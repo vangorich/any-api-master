@@ -450,50 +450,49 @@ export default function LoginPage() {
                         <form onSubmit={handleLogin} className="space-y-4">
                             <div className="space-y-2">
                                 <Label htmlFor="login-username">用户名或邮箱</Label>
-                                    <div className="relative">
-                                        <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                                        <Input
-                                            id="login-username"
-                                            type="text"
-                                            placeholder="输入用户名或邮箱"
-                                            value={username}
-                                            onChange={(e) => setUsername(e.target.value)}
-                                            className="pl-10"
-                                            required
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="space-y-2">
-                                    <Label htmlFor="login-password">密码</Label>
-                                    <div className="relative">
-                                        <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                                        <Input
-                                            id="login-password"
-                                            type="password"
-                                            placeholder="输入密码"
-                                            value={password}
-                                            onChange={(e) => setPassword(e.target.value)}
-                                            className="pl-10"
-                                            required
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Turnstile 人机验证 */}
-                                {/* Turnstile 人机验证 */}
-                                {systemConfig?.enable_turnstile && systemConfig?.turnstile_site_key && (
-                                    <TurnstileWidget
-                                        siteKey={systemConfig.turnstile_site_key}
-                                        onVerify={(token) => setTurnstileToken(token)}
-                                        onError={() => toast({ variant: 'error', title: '人机验证失败，请刷新重试' })}
+                                <div className="relative">
+                                    <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                                    <Input
+                                        id="login-username"
+                                        type="text"
+                                        placeholder="输入用户名或邮箱"
+                                        value={username}
+                                        onChange={(e) => setUsername(e.target.value)}
+                                        className="pl-10"
+                                        required
                                     />
-                                )}
+                                </div>
+                            </div>
 
-                                <Button type="submit" className="w-full" disabled={loading}>
-                                    {loading ? '登录中...' : '登录'}
-                                 </Button>
-                            </form>
+                            <div className="space-y-2">
+                                <Label htmlFor="login-password">密码</Label>
+                                <div className="relative">
+                                    <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                                    <Input
+                                        id="login-password"
+                                        type="password"
+                                        placeholder="输入密码"
+                                        value={password}
+                                        onChange={(e) => setPassword(e.target.value)}
+                                        className="pl-10"
+                                        required
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Turnstile 人机验证 */}
+                            {/* Turnstile 人机验证 */}
+                            {systemConfig?.enable_turnstile && systemConfig?.turnstile_site_key && (
+                                <TurnstileWidget
+                                    siteKey={systemConfig.turnstile_site_key}
+                                    onVerify={(token) => setTurnstileToken(token)}
+                                    onError={() => toast({ variant: 'error', title: '人机验证失败，请刷新重试' })}
+                                />
+                            )}
+
+                            <Button type="submit" className="w-full" disabled={loading}>
+                                {loading ? '登录中...' : '登录'}
+                            </Button>
                         </form>
                     ) : isResetPassword ? (
                         /* 重置密码表单 */
