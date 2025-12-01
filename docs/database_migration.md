@@ -4,15 +4,11 @@
 
 ## 🚀 快速开始
 
-**项目默认启用了自动迁移功能**，这意味着：
-- ✅ 首次启动时会自动创建所有表
-- ✅ 升级后启动时会自动应用新的迁移
-- ✅ 无需手动执行迁移命令
+数据库的结构管理和版本控制需要通过手动执行迁移命令来完成。
 
-如果您希望手动控制迁移，可以在 `.env` 文件中设置：
-```bash
-AUTO_MIGRATE=false
-```
+**核心原则**
+- 首次部署项目时，必须手动执行数据库迁移来创建所有表。
+- 每次更新应用版本后，如果涉及到数据库模型变更，也必须手动执行迁移。
 
 ## 基本概念
 
@@ -83,22 +79,10 @@ Alembic会自动检测模型变更并生成迁移脚本。
 
 ### 标记数据库版本(不执行迁移)
 
-# 3. 直接启动应用,迁移会自动执行
-uvicorn app.main:app --reload
-```
-
-**方式2: 手动迁移**
-
-```bash
-# 1-2. 同上
-
-# 3. 禁用自动迁移
-# AUTO_MIGRATE=false
-
-# 4. 手动执行迁移
+# 3. 执行数据库迁移
 python migrate.py upgrade
 
-# 5. 启动应用
+# 4. 启动应用
 uvicorn app.main:app --reload
 ```
 
@@ -117,12 +101,8 @@ pip install -r requirements.txt
 python migrate.py stamp head
 
 # 4. 启动应用
-# 如果启用了自动迁移(AUTO_MIGRATE=true),直接启动即可
+# 启动应用
 uvicorn app.main:app --reload
-
-# 或者手动执行迁移后启动
-# python migrate.py upgrade
-# uvicorn app.main:app --reload
 ```
 
 ### 开发新功能时修改数据库

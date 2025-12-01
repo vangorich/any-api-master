@@ -22,7 +22,6 @@
 - 🎯 **流式响应支持** - 完整支持 SSE 流式输出
 - 🌐 **现代化 Web 界面** - React + TypeScript 构建的精美管理后台
 - 🐳 **Docker 部署** - 一键部署，开箱即用
-- 📦 **自动数据库迁移** - 启动时自动同步数据库结构
 
 ## 🚀 快速开始
 
@@ -102,7 +101,7 @@ npm run build  # 生产环境构建
 4. **启动应用**
 
 ```bash
-# 启动后端（自动迁移数据库）
+# 启动后端
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # 开发模式（前端热重载）
@@ -115,39 +114,15 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - API 端点: `http://localhost:8000/v1/chat/completions`
 - API 文档: `http://localhost:8000/docs`
 
-### 默认管理员账户
-
-- 用户名: `admin`
-- 密码: `admin`
-
-**⚠️ 首次登录后请立即修改默认密码！**
-
 ## 📦 数据库迁移
 
 本项目使用 Alembic 进行数据库版本管理。
 
-### 自动迁移（默认启用）
-
-应用启动时会自动检查并执行数据库迁移，无需手动操作。启动时您会看到：
-
-```
-正在检查数据库迁移...
-INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
-INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
-✓ 数据库迁移完成
-```
-
-**配置自动迁移：**
-
-在 `.env` 文件中设置：
-```bash
-AUTO_MIGRATE=true   # 启用自动迁移（默认）
-# AUTO_MIGRATE=false  # 禁用自动迁移
-```
-
 ### 手动迁移
 
-如果禁用了自动迁移，可以使用以下命令：
+数据库的结构变更需要通过迁移命令手动执行。
+
+首次运行或更新版本后，请务必执行数据库迁移：
 
 ```bash
 # 升级到最新版本
@@ -248,7 +223,6 @@ print(response.choices[0].message.content)
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `DATABASE_URL` | `sqlite+aiosqlite:///./data/sql_app.db` | 数据库连接URL |
-| `AUTO_MIGRATE` | `true` | 启动时自动迁移数据库 |
 | `SECRET_KEY` | - | JWT密钥（生产环境必须修改！） |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `43200` | Token过期时间（30天） |
 | `VITE_API_STR` | `/api` | API基础路径 |
@@ -263,7 +237,6 @@ print(response.choices[0].message.content)
 ```yaml
 environment:
   - SECRET_KEY=your-secret-key-here
-  - AUTO_MIGRATE=true
   # 其他配置...
 ```
 
@@ -272,7 +245,6 @@ environment:
 ```bash
 # .env
 SECRET_KEY=your-very-secure-secret-key-change-it
-AUTO_MIGRATE=true
 ```
 
 ## 🏗️ 项目结构
@@ -347,13 +319,7 @@ ports:
 
 **问题：表不存在**
 
-确保自动迁移已启用：
-```bash
-# .env 文件
-AUTO_MIGRATE=true
-```
-
-或手动执行迁移：
+请手动执行迁移：
 ```bash
 python migrate.py upgrade
 ```

@@ -12,8 +12,6 @@ services:
       # 数据库配置
       - DATABASE_URL=sqlite+aiosqlite:///./data/sql_app.db
       
-      # 自动迁移（启用）
-      - AUTO_MIGRATE=true
       
       # 安全配置（生产环境请修改！）
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-it-in-production}
