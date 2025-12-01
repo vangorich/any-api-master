@@ -18,20 +18,20 @@ async def lifespan(app: FastAPI):
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir)
 
-    # 自动执行数据库迁移
-    if settings.AUTO_MIGRATE:
-        try:
-            from alembic.config import Config
-            from alembic import command
+    # # 自动执行数据库迁移 (已禁用，请手动执行 python migrate.py upgrade)
+    # if settings.AUTO_MIGRATE:
+    #     try:
+    #         from alembic.config import Config
+    #         from alembic import command
             
-            print("正在检查数据库迁移...")
-            alembic_cfg = Config("alembic.ini")
-            await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
-            print("✓ 数据库迁移完成")
-        except Exception as e:
-            print(f"警告: 自动迁移失败: {e}")
-            print("提示: 可以手动执行: python migrate.py upgrade")
-            print("或在.env中设置 AUTO_MIGRATE=false 禁用自动迁移")
+    #         print("正在检查数据库迁移...")
+    #         alembic_cfg = Config("alembic.ini")
+    #         await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+    #         print("✓ 数据库迁移完成")
+    #     except Exception as e:
+    #         print(f"警告: 自动迁移失败: {e}")
+    #         print("提示: 可以手动执行: python migrate.py upgrade")
+    #         print("或在.env中设置 AUTO_MIGRATE=false 禁用自动迁移")
     
     # Startup: Load site name from DB and set as app title
     db_session_gen = get_db()

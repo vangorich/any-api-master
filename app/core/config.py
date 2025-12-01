@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/sql_app.db"
-    AUTO_MIGRATE: bool = True  # 启动时自动执行数据库迁移
 
     # Proxy
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com"
