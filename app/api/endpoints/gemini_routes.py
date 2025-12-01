@@ -93,7 +93,9 @@ async def proxy_v1beta(
     
     return await proxy_service.smart_proxy_handler(
         request=request,
-        path=path, # "models/..."
-        official_key=official_key,
+        db=db,
+        path=path,
+        official_key_obj=official_key,
+        user=user,
         incoming_format="gemini"
     )

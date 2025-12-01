@@ -482,14 +482,14 @@ class ProxyService:
         except httpx.RequestError as e:
             logger.error(f"[Proxy] Stream conversion request failed: {e}", exc_info=True)
             error_message = f"无法连接到上游服务: {type(e).__name__}"
-            openai_error = ErrorConverter.convert_upstream_error(error_message.encode(), 502, "openai", to_format)
+            openai_error = ErrorConverter.convert_upstream_error(error_message.encode('utf-8'), 502, "openai", to_format)
             yield f"data: {json.dumps(openai_error)}\n\n"
             yield b"data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"[Proxy] Stream conversion error: {e}", exc_info=True)
             # Yield a generic error in the stream
-            error_message = f"流转换中发生内部错误: {type(e).__name__}"
-            openai_error = ErrorConverter.convert_upstream_error(error_message.encode(), 500, "openai", to_format)
+            error_message = f"流转换中发生内部错误: {str(e)}"
+            openai_error = ErrorConverter.convert_upstream_error(error_message.encode('utf-8'), 500, "openai", to_format)
             yield f"data: {json.dumps(openai_error)}\n\n"
             yield b"data: [DONE]\n\n"
         finally:

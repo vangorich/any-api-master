@@ -87,6 +87,24 @@ class UniversalConverter:
 
         return converted_body, from_format
 
+    def convert_chunk(self, chunk: Dict[str, Any], to_format: ApiFormat, from_provider: ApiFormat, original_model: str) -> Tuple[Dict[str, Any], bool]:
+        """
+        转换单个流式块。
+        返回 (转换后的块, 是否为结束块)
+        """
+        if from_provider == to_format:
+            return chunk, False # Passthrough, we don't know if it's the end
+
+        converter_func = getattr(self, f"{from_provider}_to_{to_format}_chunk", None)
+        if not callable(converter_func):
+            # Fallback for simplicity, just wrap it
+            return {"converted_chunk": chunk}, False
+
+        converted = converter_func(chunk, original_model)
+        is_done = converted.get("choices", [{}])[0].get("finish_reason") is not None
+        
+        return converted, is_done
+
     # --- OpenAI <-> Gemini ---
     
     def gemini_request_to_openai_request(self, body: Dict[str, Any], request: Request = None) -> Dict[str, Any]:
