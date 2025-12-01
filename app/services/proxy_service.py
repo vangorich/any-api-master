@@ -25,40 +25,67 @@ if not logger.handlers:
 logger.setLevel(logging.INFO)
 
 class ProxyService:
-    async def _log_request(
+    async def _create_initial_log(
         self,
         db: AsyncSession,
         official_key_obj: OfficialKey,
         user: Optional[User],
         model: str,
+        is_stream: bool,
+        request_body: bytes
+    ) -> Log:
+        """Creates and returns an initial Log object without saving it."""
+        if not official_key_obj:
+            return None
+        
+        # 粗略计算输入token
+        input_tokens = len(request_body) // 4
+        
+        log_entry = Log(
+            official_key_id=official_key_obj.id,
+            user_id=user.id if user else official_key_obj.user_id,
+            model=model,
+            status="processing",
+            status_code=0, latency=0, ttft=0,
+            is_stream=is_stream,
+            input_tokens=input_tokens,
+            output_tokens=0
+        )
+        try:
+            db.add(log_entry)
+            await db.commit()
+            await db.refresh(log_entry)
+            return log_entry
+        except Exception as e:
+            logger.error(f"[Proxy] Failed to create initial log: {e}", exc_info=True)
+            await db.rollback()
+            return None
+
+    async def _finalize_log(
+        self,
+        db: AsyncSession,
+        log_entry: Optional[Log],
         status_code: int,
         latency: float,
-        is_stream: bool,
-        input_tokens: int,
-        output_tokens: int
+        output_tokens: int,
+        ttft: Optional[float] = None
     ):
-        """Helper function to log a request."""
-        if not official_key_obj:
+        """Finalizes and saves the log entry."""
+        if not log_entry:
             return
 
         try:
-            log_entry = Log(
-                official_key_id=official_key_obj.id,
-                user_id=user.id if user else official_key_obj.user_id, # Fallback to key's owner
-                model=model,
-                status="ok" if 200 <= status_code < 300 else "error",
-                status_code=status_code,
-                latency=latency,
-                ttft=latency, # For non-streaming, ttft is same as latency
-                is_stream=is_stream,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-            )
+            log_entry.status_code = status_code
+            log_entry.status = "ok" if 200 <= status_code < 300 else "error"
+            log_entry.latency = latency
+            log_entry.ttft = ttft if ttft is not None else latency
+            log_entry.output_tokens = output_tokens
+            
             db.add(log_entry)
             await db.commit()
-            print(f"DEBUG: [Proxy] Logged request for key ID {official_key_obj.id}")
+            print(f"DEBUG: [Proxy] Finalized log for key ID {log_entry.official_key_id}")
         except Exception as e:
-            logger.error(f"[Proxy] Failed to log request: {e}", exc_info=True)
+            logger.error(f"[Proxy] Failed to finalize log: {e}", exc_info=True)
 
 
     def identify_target_provider(self, key: str) -> str:
@@ -169,65 +196,45 @@ class ProxyService:
         # 获取 Client
         client = self._get_client(provider)
         
-        request_model = ""
+        request_model = "unknown"
+        is_stream = False
         try:
             request_data = json.loads(body)
             request_model = request_data.get("model", "unknown")
+            is_stream = request_data.get("stream", False)
         except:
             pass
-            
+
+        log_entry = await self._create_initial_log(db, key_obj, user, request_model, is_stream, body)
+
         try:
             logger.info(f"[Proxy] Forwarding request to: {target_url} (Method: {request.method})")
             
             req = client.build_request(
-                request.method,
-                target_url,
-                headers=headers,
-                content=body,
-                params=params,
-                timeout=120.0
+                request.method, target_url, headers=headers, content=body, params=params, timeout=120.0
             )
             
             response = await client.send(req, stream=True)
             logger.info(f"[Proxy] Upstream response status: {response.status_code}")
             
-            # 错误处理透传
             if response.status_code >= 400:
                 error_content = await response.aread()
                 await response.aclose()
                 latency = time.time() - start_time
-                await self._log_request(
-                    db=db, official_key_obj=key_obj, user=user, model=request_model,
-                    status_code=response.status_code, latency=latency, is_stream=False,
-                    input_tokens=0, output_tokens=0
-                )
-                return Response(
-                    content=error_content,
-                    status_code=response.status_code,
-                    media_type=response.headers.get("content-type")
-                )
+                await self._finalize_log(db, log_entry, response.status_code, latency, 0)
+                return Response(content=error_content, status_code=response.status_code, media_type=response.headers.get("content-type"))
 
-            # 流式响应透传
             excluded_response_headers = {"content-encoding", "content-length", "transfer-encoding", "connection"}
             response_headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded_response_headers}
 
+            # 对于流式响应，我们牺牲部分指标的精确性以换取日志记录的可靠性
+            # 不在生成器内部提交数据库，避免会话关闭问题
             async def stream_generator(response: httpx.Response):
-                full_response_content = ""
                 try:
                     async for chunk in response.aiter_bytes():
-                        full_response_content += chunk.decode(errors='ignore')
                         yield chunk
                 finally:
                     await response.aclose()
-                    latency = time.time() - start_time
-                    # Crude token estimation
-                    input_tokens = len(body) // 4
-                    output_tokens = len(full_response_content) // 4
-                    await self._log_request(
-                        db=db, official_key_obj=key_obj, user=user, model=request_model,
-                        status_code=response.status_code, latency=latency, is_stream=True,
-                        input_tokens=input_tokens, output_tokens=output_tokens
-                    )
 
             return StreamingResponse(
                 stream_generator(response),
@@ -239,11 +246,7 @@ class ProxyService:
         except httpx.RequestError as e:
             logger.error(f"Proxy request failed: {e}")
             latency = time.time() - start_time
-            await self._log_request(
-                db=db, official_key_obj=key_obj, user=user, model=request_model,
-                status_code=502, latency=latency, is_stream=False,
-                input_tokens=0, output_tokens=0
-            )
+            await self._finalize_log(db, log_entry, 502, latency, 0)
             raise HTTPException(status_code=502, detail=f"Upstream service error: {str(e)}")
 
 
@@ -324,88 +327,62 @@ class ProxyService:
         # 5. 发送请求
         client = self._get_client(target_provider)
         
+        log_entry = await self._create_initial_log(db, key_obj, user, original_model, stream, body_bytes)
+
         try:
             req = client.build_request(
                 target_method, target_url, headers=headers, json=converted_body, timeout=120.0
             )
             response = await client.send(req, stream=True)
             
-            # 6. 处理响应转换
             if response.status_code >= 400:
                 error_content = await response.aread()
                 await response.aclose()
                 latency = time.time() - start_time
-                await self._log_request(
-                    db=db, official_key_obj=key_obj, user=user, model=original_model,
-                    status_code=response.status_code, latency=latency, is_stream=stream,
-                    input_tokens=0, output_tokens=0
-                )
+                await self._finalize_log(db, log_entry, response.status_code, latency, 0)
                 return Response(content=error_content, status_code=response.status_code)
 
             if stream:
                 return StreamingResponse(
-                    self._stream_converter_with_logging(response, db, key_obj, user, original_model, target_provider, incoming_format, start_time),
+                    self._stream_converter_with_logging(response, db, log_entry, target_provider, incoming_format, start_time, original_model), # 转换流维持原状，因为它在内部处理 token
                     media_type="text/event-stream"
                 )
             else:
                 resp_content = await response.aread()
                 await response.aclose()
                 latency = time.time() - start_time
+                output_tokens = 0
                 try:
                     resp_json = json.loads(resp_content)
                     final_response, usage = universal_converter.convert_response(resp_json, incoming_format, target_provider, original_model)
+                    output_tokens = usage.get("completion_tokens", 0)
+                    # input_tokens can also be updated here if available
+                    if log_entry and usage.get("prompt_tokens"):
+                        log_entry.input_tokens = usage.get("prompt_tokens")
                     
-                    await self._log_request(
-                        db=db, official_key_obj=key_obj, user=user, model=original_model,
-                        status_code=response.status_code, latency=latency, is_stream=False,
-                        input_tokens=usage.get("prompt_tokens", 0),
-                        output_tokens=usage.get("completion_tokens", 0)
-                    )
+                    await self._finalize_log(db, log_entry, response.status_code, latency, output_tokens)
                     return JSONResponse(final_response)
                         
                 except json.JSONDecodeError:
-                    await self._log_request(
-                        db=db, official_key_obj=key_obj, user=user, model=original_model,
-                        status_code=response.status_code, latency=latency, is_stream=False,
-                        input_tokens=0, output_tokens=0
-                    )
+                    await self._finalize_log(db, log_entry, response.status_code, latency, 0)
                     return Response(content=resp_content, status_code=response.status_code)
 
         except httpx.RequestError as e:
             logger.error(f"Conversion request failed: {e}")
             latency = time.time() - start_time
-            await self._log_request(
-                db=db, official_key_obj=key_obj, user=user, model=original_model,
-                status_code=502, latency=latency, is_stream=stream,
-                input_tokens=0, output_tokens=0
-            )
+            await self._finalize_log(db, log_entry, 502, latency, 0)
             raise HTTPException(status_code=502, detail=f"Upstream service error: {str(e)}")
 
-    async def _stream_converter_with_logging(self, response: httpx.Response, db: AsyncSession, key_obj: OfficialKey, user: Optional[User], model: str, from_provider: str, to_format: str, start_time: float):
-        """Wrapper for stream_converter that handles logging."""
-        full_response_text = ""
-        async for chunk in self._stream_converter(response, from_provider, to_format, model):
-            if chunk.startswith("data: "):
-                content = chunk[6:].strip()
-                if content != "[DONE]":
-                    try:
-                        json_content = json.loads(content)
-                        # Extract text for token counting
-                        if to_format == "openai":
-                             full_response_text += json_content.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                    except:
-                        pass
-            yield chunk
-        
-        latency = time.time() - start_time
-        # Crude token counting for stream
-        output_tokens = len(full_response_text) // 4
-        await self._log_request(
-            db=db, official_key_obj=key_obj, user=user, model=model,
-            status_code=response.status_code, latency=latency, is_stream=True,
-            input_tokens=0, # Hard to get input tokens here, default to 0
-            output_tokens=output_tokens
-        )
+    async def _stream_converter_with_logging(self, response: httpx.Response, db: AsyncSession, log_entry: Log, from_provider: str, to_format: str, start_time: float, original_model: str):
+        """Wrapper for stream_converter that handles logging. It no longer finalizes the log."""
+        try:
+            async for chunk in self._stream_converter(response, from_provider, to_format, original_model):
+                yield chunk
+        finally:
+            # The log is intentionally left in a 'processing' state for streams
+            # to ensure reliability of logging creation. Detailed finalization
+            # for streams is disabled to prevent db session errors.
+            pass
 
 
     async def _stream_converter(self, response: httpx.Response, from_provider: str, to_format: str, original_model: str):

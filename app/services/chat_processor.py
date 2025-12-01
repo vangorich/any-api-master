@@ -2,7 +2,7 @@ import json
 import time
 import httpx
 import logging
-from typing import AsyncGenerator, Tuple, List, Dict, Any
+from typing import AsyncGenerator, Tuple, List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.openai import ChatCompletionRequest, ChatMessage
@@ -10,7 +10,7 @@ from app.services.universal_converter import universal_converter, ApiFormat
 from app.services.variable_service import variable_service
 from app.services.regex_service import regex_service
 from app.models.user import User
-from app.models.key import ExclusiveKey
+from app.models.key import ExclusiveKey, OfficialKey
 from app.models.preset import Preset
 from app.models.regex import RegexRule
 from app.models.preset_regex import PresetRegexRule
@@ -35,44 +35,43 @@ class ChatProcessor:
         log_level: str,
         model_override: str = None
     ) -> Tuple[Dict[str, Any], int, ApiFormat]:
-        """
-        处理聊天请求的核心逻辑，包括格式转换、预设、正则等。
-        """
-        # 1. 解析和转换请求
-        body = await request.json()
-        target_format = "gemini" # 目前上游固定为Gemini
-        
+        start_time = time.time()
+        body_bytes = await request.body()
+        body = json.loads(body_bytes)
+        target_format = "gemini"
+
         converted_body, original_format = await universal_converter.convert_request(body, "openai", request=request)
         
-        # 如果有模型覆盖，使用覆盖的模型
         if model_override:
             converted_body["model"] = model_override
             
         openai_request = ChatCompletionRequest(**converted_body)
+        
+        log_entry = await self._create_initial_log(db, exclusive_key, user, openai_request.model, openai_request.stream, body_bytes)
 
-        # 2. 加载预设和正则
         presets, regex_rules, preset_regex_rules = await self._load_context(db, exclusive_key)
-
-        # 3. 应用前置处理（正则 -> 预设 -> 变量）
         openai_request = self._apply_preprocessing(openai_request, presets, regex_rules, preset_regex_rules)
-
-        # 4. 再次转换到目标格式
         final_payload, _ = await universal_converter.convert_request(openai_request.dict(), target_format)
         
-        # 5. 发送到上游并处理响应
-        # 修正流式判断逻辑：现在 UniversalConverter 会确保 stream 属性被正确设置
         if openai_request.stream:
-            return self.stream_chat_completion(
-                final_payload, target_format, original_format, openai_request.model,
-                official_key=official_key,
-                global_rules=regex_rules, local_rules=preset_regex_rules
+            return self._logged_stream_generator(
+                self.stream_chat_completion(
+                    final_payload, target_format, original_format, openai_request.model,
+                    official_key, regex_rules, preset_regex_rules
+                ),
+                db=db,
+                log_entry=log_entry,
+                start_time=start_time
             )
         else:
-            return await self.non_stream_chat_completion(
+            result, status_code, _ = await self.non_stream_chat_completion(
                 final_payload, target_format, original_format, openai_request.model,
-                official_key=official_key,
-                global_rules=regex_rules, local_rules=preset_regex_rules
+                official_key, regex_rules, preset_regex_rules
             )
+            latency = time.time() - start_time
+            output_tokens = result.get('usage', {}).get('completion_tokens', 0)
+            await self._finalize_log(db, log_entry, status_code, latency, output_tokens)
+            return result, status_code, original_format
 
     async def _load_context(self, db: AsyncSession, exclusive_key: ExclusiveKey) -> Tuple[List, List, List]:
         """从数据库加载预设和正则规则"""
@@ -154,11 +153,38 @@ class ChatProcessor:
         content = regex_service.process(content, global_post)
         return content
 
+    async def _create_initial_log(self, db: AsyncSession, exclusive_key: ExclusiveKey, user: User, model: str, is_stream: bool, request_body: bytes) -> Log:
+        input_tokens = len(request_body) // 4
+        log_entry = Log(
+            exclusive_key_id=exclusive_key.id,
+            user_id=user.id,
+            model=model,
+            status="processing",
+            status_code=0,
+            latency=0, ttft=0,
+            is_stream=is_stream,
+            input_tokens=input_tokens,
+            output_tokens=0
+        )
+        return log_entry
+
+    async def _finalize_log(self, db: AsyncSession, log_entry: Optional[Log], status_code: int, latency: float, output_tokens: int, ttft: Optional[float] = None):
+        if not log_entry: return
+        try:
+            log_entry.status_code = status_code
+            log_entry.status = "ok" if 200 <= status_code < 300 else "error"
+            log_entry.latency = latency
+            log_entry.ttft = ttft if ttft is not None else latency
+            log_entry.output_tokens = output_tokens
+            db.add(log_entry)
+            await db.commit()
+        except Exception as e:
+            logger.error(f"[ChatProcessor] Failed to finalize log: {e}", exc_info=True)
+
     async def non_stream_chat_completion(
         self, payload: Dict, upstream_format: ApiFormat, original_format: ApiFormat, model: str,
         official_key: str, global_rules: List, local_rules: List
     ) -> Tuple[Dict, int, ApiFormat]:
-        """处理非流式请求"""
         target_url = f"{settings.GEMINI_BASE_URL}/v1beta/models/{model}:generateContent"
         headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key if hasattr(official_key, 'key') else official_key}
         
@@ -166,7 +192,7 @@ class ChatProcessor:
         
         if response.status_code != 200:
             openai_error = universal_converter.generic_error_to_openai(response.content, response.status_code, upstream_format)
-            return openai_error, response.status_code, "openai" # 错误总是返回OpenAI格式
+            return openai_error, response.status_code, "openai"
 
         gemini_response = response.json()
         openai_response = universal_converter.gemini_response_to_openai_response(gemini_response, model)
@@ -176,18 +202,46 @@ class ChatProcessor:
             content = self._apply_postprocessing(content, global_rules, local_rules)
             openai_response['choices'][0]['message']['content'] = content
 
-        # 注意：这里我们转换的是Response，不再使用convert_request
         if original_format == "gemini":
             gemini_response = universal_converter.openai_response_to_gemini_response(openai_response)
             return gemini_response, 200, original_format
         
         return openai_response, 200, original_format
 
+    async def _logged_stream_generator(self, generator: AsyncGenerator, db: AsyncSession, log_entry: Log, start_time: float):
+        ttft = 0.0
+        first_chunk = True
+        full_response_content = ""
+        status_code = 200
+        try:
+            async for chunk in generator:
+                if first_chunk:
+                    ttft = time.time() - start_time
+                    first_chunk = False
+                
+                if chunk.startswith(b'data: '):
+                    content_part = chunk[6:].strip()
+                    if content_part != b'[DONE]':
+                        try:
+                            json_content = json.loads(content_part)
+                            if json_content.get('error'):
+                                status_code = json_content.get('error', {}).get('code', 500)
+                            if json_content.get('choices'):
+                                delta = json_content['choices'][0].get('delta', {})
+                                full_response_content += delta.get('content', '')
+                        except json.JSONDecodeError:
+                            pass
+                yield chunk
+        finally:
+            latency = time.time() - start_time
+            output_tokens = len(full_response_content) // 4
+            await self._finalize_log(db, log_entry, status_code, latency, output_tokens, ttft)
+
+
     async def stream_chat_completion(
         self, payload: Dict, upstream_format: ApiFormat, original_format: ApiFormat, model: str,
         official_key: str, global_rules: List, local_rules: List
     ) -> AsyncGenerator[bytes, None]:
-        """处理流式请求"""
         target_url = f"{settings.GEMINI_BASE_URL}/v1beta/models/{model}:streamGenerateContent"
         headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key if hasattr(official_key, 'key') else official_key}
 
@@ -199,45 +253,29 @@ class ChatProcessor:
                 return
 
             buffer = ""
-            buffer = ""
             async for chunk in response.aiter_text():
                 buffer += chunk
-                # 尝试循环解析 buffer 中的所有完整 JSON 对象
                 decoder = json.JSONDecoder()
                 while buffer:
-                    # 去掉前导的空白字符、逗号或左方括号，这些是数组的分隔符
                     buffer = buffer.lstrip(' \t\n\r,([')
-                    if not buffer:
-                        break
-                    
+                    if not buffer: break
                     try:
                         gemini_chunk, idx = decoder.raw_decode(buffer)
-                        # idx 是 JSON 对象结束的索引
-                        
-                        # 处理解析出的 chunk
                         openai_chunk = universal_converter.gemini_to_openai_chunk(gemini_chunk, model)
-
                         if openai_chunk.get('choices') and openai_chunk['choices'][0]['delta'].get('content'):
                             content = openai_chunk['choices'][0]['delta']['content']
                             content = self._apply_postprocessing(content, global_rules, local_rules)
                             openai_chunk['choices'][0]['delta']['content'] = content
                         
-                        # 如果原始请求是 Gemini 格式，则将 OpenAI Chunk 转回 Gemini Chunk
                         if original_format == "gemini":
                             gemini_response_chunk = universal_converter.openai_chunk_to_gemini_chunk(openai_chunk)
                             yield f"data: {json.dumps(gemini_response_chunk)}\n\n".encode()
                         else:
                             yield f"data: {json.dumps(openai_chunk)}\n\n".encode()
                         
-                        # 将 buffer 指针向前移动，准备解析下一个对象
                         buffer = buffer[idx:]
-                        
                     except json.JSONDecodeError:
-                        # 说明当前 buffer 开头的数据还不足以构成一个完整的 JSON 对象
-                        # 或者真的格式错误。对于流式传输，通常是数据不完整。
-                        # 我们跳出循环，等待更多数据拼接到 buffer 后面
                         break
-        
         yield b"data: [DONE]\n\n"
 
 chat_processor = ChatProcessor()
