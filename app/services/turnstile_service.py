@@ -43,6 +43,9 @@ class TurnstileService:
                 
                 async with session.post(self.VERIFY_URL, data=data) as response:
                     result = await response.json()
+                    print(f"Turnstile验证结果: {result}")
+                    if not result.get('success', False):
+                        print(f"Turnstile验证失败: {result.get('error-codes', [])}")
                     return result.get('success', False)
         except Exception as e:
             print(f"Turnstile verification error: {e}")
