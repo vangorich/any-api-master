@@ -15,3 +15,4 @@ captcha
 alembic
 asyncpg
 aiomysql
+tiktoken
