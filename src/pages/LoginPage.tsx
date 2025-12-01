@@ -420,6 +420,24 @@ export default function LoginPage() {
         }
     };
 
+    // 可重用的人机验证组件
+    const TurnstileComponent = () => {
+        if (!systemConfig?.enable_turnstile || !systemConfig.turnstile_site_key) {
+            return null;
+        }
+        return (
+            <div className="flex justify-center my-4">
+                <TurnstileWidget
+                    ref={turnstileRef}
+                    siteKey={systemConfig.turnstile_site_key}
+                    onVerify={handleTurnstileVerify}
+                    onError={() => toast({ variant: 'error', title: '人机验证失败，请刷新重试' })}
+                    appearance="always" // 保持可见
+                />
+            </div>
+        );
+    };
+
     return (
         <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary/10 via-background to-secondary/10 p-4">
             <CaptchaDialog
@@ -427,15 +445,7 @@ export default function LoginPage() {
                 onOpenChange={setIsCaptchaDialogOpen}
                 onSuccess={onCaptchaSuccess}
             />
-            {systemConfig?.enable_turnstile && systemConfig.turnstile_site_key && (
-                <TurnstileWidget
-                    ref={turnstileRef}
-                    siteKey={systemConfig.turnstile_site_key}
-                    onVerify={handleTurnstileVerify}
-                    onError={() => toast({ variant: 'error', title: '人机验证失败，请刷新重试' })}
-                    appearance="interaction-only"
-                />
-            )}
+            {/* Turnstile 组件现在将在下面的表单中被调用 */}
             <div className="bg-card border rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
                 {/* 标题区域 */}
                 <div className="bg-gradient-to-r from-primary to-primary/80 text-primary-foreground p-8 text-center">
@@ -538,7 +548,7 @@ export default function LoginPage() {
                             </div>
 
                             {/* Turnstile 人机验证 */}
-                            {/* Turnstile 人机验证 */}
+                            <TurnstileComponent />
 
                             <Button type="submit" className="w-full" disabled={loading}>
                                 {loading ? '登录中...' : '登录'}
@@ -648,6 +658,9 @@ export default function LoginPage() {
                                 </div>
                             </div>
 
+                            
+                            {/* Turnstile 人机验证 */}
+                            <TurnstileComponent />
                             
                             <Button type="submit" className="w-full" disabled={loading}>
                                  {loading ? '重置中...' : '重置密码'}
@@ -771,6 +784,9 @@ export default function LoginPage() {
                                     </div>
                                 </div>
 
+
+                                {/* Turnstile 人机验证 */}
+                                <TurnstileComponent />
 
                                 <Button type="submit" className="w-full" disabled={loading}>
                                     {loading ? '注册中...' : '注册'}
