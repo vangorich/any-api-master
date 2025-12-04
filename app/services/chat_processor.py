@@ -59,7 +59,7 @@ class ChatProcessor:
             return self._logged_stream_generator(
                 self.stream_chat_completion(
                     final_payload, target_format, original_format, openai_request.model,
-                    official_key.key, regex_rules, preset_regex_rules
+                    official_key, regex_rules, preset_regex_rules
                 ),
                 db=db,
                 log_entry=log_entry,
@@ -69,7 +69,7 @@ class ChatProcessor:
         else:
             result, status_code, _ = await self.non_stream_chat_completion(
                 final_payload, target_format, original_format, openai_request.model,
-                official_key.key, regex_rules, preset_regex_rules
+                official_key, regex_rules, preset_regex_rules
             )
             latency = time.time() - start_time
             # Re-calculate output tokens from the actual response content
@@ -218,10 +218,14 @@ class ChatProcessor:
 
     async def non_stream_chat_completion(
         self, payload: Dict, upstream_format: ApiFormat, original_format: ApiFormat, model: str,
-        official_key: str, global_rules: List, local_rules: List
+        official_key: OfficialKey, global_rules: List, local_rules: List
     ) -> Tuple[Dict, int, ApiFormat]:
-        target_url = f"{settings.GEMINI_BASE_URL}/v1beta/models/{model}:generateContent"
-        headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key if hasattr(official_key, 'key') else official_key}
+        base_url = settings.GEMINI_BASE_URL
+        if official_key.channel and official_key.channel.api_url:
+            base_url = official_key.channel.api_url.rstrip('/')
+        
+        target_url = f"{base_url}/v1beta/models/{model}:generateContent"
+        headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key}
         
         response = await self.client.post(target_url, json=payload, headers=headers)
         
@@ -286,10 +290,14 @@ class ChatProcessor:
 
     async def stream_chat_completion(
         self, payload: Dict, upstream_format: ApiFormat, original_format: ApiFormat, model: str,
-        official_key: str, global_rules: List, local_rules: List
+        official_key: OfficialKey, global_rules: List, local_rules: List
     ) -> AsyncGenerator[bytes, None]:
-        target_url = f"{settings.GEMINI_BASE_URL}/v1beta/models/{model}:streamGenerateContent"
-        headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key if hasattr(official_key, 'key') else official_key}
+        base_url = settings.GEMINI_BASE_URL
+        if official_key.channel and official_key.channel.api_url:
+            base_url = official_key.channel.api_url.rstrip('/')
+
+        target_url = f"{base_url}/v1beta/models/{model}:streamGenerateContent"
+        headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key}
 
         try:
             async with self.client.stream("POST", target_url, json=payload, headers=headers) as response:

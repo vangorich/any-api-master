@@ -170,28 +170,27 @@ class ProxyService:
         # 构建目标 URL
         base_url = ""
         target_path = path
-        
+
+        # 优先使用渠道自定义的 api_url
+        if key_obj.channel and key_obj.channel.api_url:
+            base_url = key_obj.channel.api_url.rstrip('/')
+        else:
+            # 回退到默认地址
+            if provider == "openai":
+                base_url = "https://api.openai.com"
+            elif provider == "gemini":
+                base_url = "https://generativelanguage.googleapis.com"
+            elif provider == "claude":
+                base_url = "https://api.anthropic.com"
+
+        # 构建目标路径
         if provider == "openai":
-            base_url = "https://api.openai.com"
-            if not path.startswith("/"):
-                target_path = f"/v1/{path}"
-            else:
-                target_path = path
-                
+            target_path = f"/v1/{path}" if not path.startswith("/") else path
         elif provider == "gemini":
-            base_url = "https://generativelanguage.googleapis.com"
-            if not path.startswith("/"):
-                target_path = f"/v1beta/{path}"
-            else:
-                target_path = path
-
+            target_path = f"/v1beta/{path}" if not path.startswith("/") else path
         elif provider == "claude":
-            base_url = "https://api.anthropic.com"
-            if not path.startswith("/"):
-                target_path = f"/v1/{path}"
-            else:
-                target_path = path
-
+            target_path = f"/v1/{path}" if not path.startswith("/") else path
+        
         target_url = f"{base_url}{target_path}"
         
         # 处理 Headers
@@ -347,21 +346,32 @@ class ProxyService:
                 model = f"models/{model}"
 
             action = "streamGenerateContent" if stream else "generateContent"
-            target_url = f"https://generativelanguage.googleapis.com/v1beta/{model}:{action}"
+            
+            base_url = "https://generativelanguage.googleapis.com"
+            if key_obj.channel and key_obj.channel.api_url:
+                base_url = key_obj.channel.api_url.rstrip('/')
+
+            target_url = f"{base_url}/v1beta/{model}:{action}"
             target_method = "POST"
             
             if "model" in converted_body: del converted_body["model"]
             if "stream" in converted_body: del converted_body["stream"]
 
         elif target_provider == "claude":
-            target_url = "https://api.anthropic.com/v1/messages"
+            base_url = "https://api.anthropic.com"
+            if key_obj.channel and key_obj.channel.api_url:
+                base_url = key_obj.channel.api_url.rstrip('/')
+            target_url = f"{base_url}/v1/messages"
             target_method = "POST"
             current_model = converted_body.get("model", "")
             if not current_model.startswith("claude-"):
                 converted_body["model"] = "claude-3-5-sonnet-20240620"
             
         elif target_provider == "openai":
-            target_url = "https://api.openai.com/v1/chat/completions"
+            base_url = "https://api.openai.com"
+            if key_obj.channel and key_obj.channel.api_url:
+                base_url = key_obj.channel.api_url.rstrip('/')
+            target_url = f"{base_url}/v1/chat/completions"
             target_method = "POST"
 
         # 4. 准备 Headers
