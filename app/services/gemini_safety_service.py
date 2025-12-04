@@ -24,23 +24,20 @@ ALL_HARM_CATEGORIES = [
 class HarmBlockThreshold:
     """安全设置的阈值"""
     OFF = "OFF"                                                 # 关闭安全过滤
-    BLOCK_NONE = "BLOCK_NONE"                                   # 无论可能性如何，都不屏蔽 (等同于 OFF)
     BLOCK_ONLY_HIGH = "BLOCK_ONLY_HIGH"                         # 仅在概率较高时屏蔽
     BLOCK_MEDIUM_AND_ABOVE = "BLOCK_MEDIUM_AND_ABOVE"           # 在概率为中等或更高时屏蔽
     BLOCK_LOW_AND_ABOVE = "BLOCK_LOW_AND_ABOVE"                 # 在概率为低、中或高时屏蔽
     HARM_BLOCK_THRESHOLD_UNSPECIFIED = "HARM_BLOCK_THRESHOLD_UNSPECIFIED" # 未指定阈值，使用默认值
 
 class GeminiSafetyService:
-    def get_default_safety_settings(self, use_off: bool = True) -> List[Dict[str, Any]]:
+    def get_default_safety_settings(self) -> List[Dict[str, Any]]:
         """
-        生成默认的安全设置列表。
-        :param use_off: 如果为 True，使用 'OFF' 作为阈值，否则使用 'BLOCK_NONE'。
+        生成默认的安全设置列表，将所有类别的阈值设置为 OFF。
         """
-        threshold = HarmBlockThreshold.OFF if use_off else HarmBlockThreshold.BLOCK_NONE
         return [
             {
                 "category": category,
-                "threshold": threshold,
+                "threshold": HarmBlockThreshold.OFF,
             }
             for category in ALL_HARM_CATEGORIES
         ]
@@ -51,8 +48,7 @@ class GeminiSafetyService:
         如果请求体中已经存在 safetySettings，则不进行任何操作。
         """
         if "safetySettings" not in payload:
-            # 默认使用 OFF
-            payload["safetySettings"] = self.get_default_safety_settings(use_off=True)
+            payload["safetySettings"] = self.get_default_safety_settings()
         return payload
 
 # 创建一个单例
