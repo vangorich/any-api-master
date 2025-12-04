@@ -137,8 +137,8 @@ class ProxyService:
         # 拦截对 /v1beta/models 的 GET 请求，并将其重定向到统一的模型处理服务
         if path == "models" and request.method == "GET":
             logger.info(f"[Proxy] 拦截到 /v1beta/models 请求，转交统一模型服务处理。")
-            # 传入客户端期望的格式
-            return await self.get_and_transform_models(db=db, official_key=official_key_obj, target_format=incoming_format)
+            # 传入客户端期望的格式和完整的request对象
+            return await self.get_and_transform_models(request=request, db=db, official_key=official_key_obj, target_format=incoming_format)
         
         # The target provider is determined by the channel configuration
         target_provider = "gemini" # Default value

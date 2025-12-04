@@ -30,6 +30,7 @@ router = APIRouter()
 
 @router.get("/v1/models")
 async def list_models(
+    request: Request,
     db: AsyncSession = Depends(deps.get_db),
     key_info: tuple = Depends(deps.get_official_key_from_proxy)
 ):
@@ -37,7 +38,7 @@ async def list_models(
     处理 GET /v1/models 请求，现在通过集中的服务来获取模型列表。
     """
     official_key, _ = key_info
-    return await proxy_service.get_and_transform_models(db=db, official_key=official_key, target_format="openai")
+    return await proxy_service.get_and_transform_models(request=request, db=db, official_key=official_key, target_format="openai")
 
 
 @router.api_route("/v1beta/{path:path}", methods=["POST", "PUT", "DELETE", "GET"])
