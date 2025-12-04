@@ -42,6 +42,7 @@ class ChatProcessor:
         start_time = time.time()
         body_bytes = await request.body()
         body = json.loads(body_bytes)
+        # 仅在DEBUG模式下打印完整请求体
         logger.debug(f"客户端原始请求体: {json.dumps(body, indent=2, ensure_ascii=False)}")
         
         # The target format is determined by the channel configuration
@@ -225,10 +226,10 @@ class ChatProcessor:
 
             db.add(official_key)
             await db.commit()
-            logger.info(f"[ChatProcessor] Finalized log and updated key stats for Official Key ID {official_key.id}")
+            logger.info(f"[ChatProcessor] 日志已归档，Key 统计已更新 (Official Key ID {official_key.id})")
 
         except Exception as e:
-            logger.error(f"[ChatProcessor] Failed to finalize log and key stats for Official Key ID {official_key.id}. Error: {e}", exc_info=True)
+            logger.error(f"[ChatProcessor] 归档日志或更新 Key 统计失败 (Official Key ID {official_key.id}). 错误: {e}", exc_info=True)
             await db.rollback()
 
     async def non_stream_chat_completion(
@@ -424,14 +425,10 @@ class ChatProcessor:
                                     upstream_chunks.append(json.loads(potential_json))
 
                                 for upstream_chunk in upstream_chunks:
-                                    logger.debug(f"从上游接收并成功解析的块: {json.dumps(upstream_chunk, indent=2, ensure_ascii=False)}")
-
                                     # 1. 转换为内部格式 (OpenAI)
                                     internal_chunk, _ = universal_converter.convert_chunk(upstream_chunk, "openai", upstream_format, model)
                                     if not internal_chunk:
-                                        logger.debug("块转换(->openai)后为空，跳过")
                                         continue
-                                    logger.debug(f"转换为内部格式 (openai) 的块: {json.dumps(internal_chunk, indent=2, ensure_ascii=False)}")
                                     
                                     # 2. 应用后处理
                                     if internal_chunk.get('choices') and internal_chunk['choices'][0].get('delta', {}).get('content'):
@@ -442,9 +439,7 @@ class ChatProcessor:
                                     # 3. 转换为最终客户端格式
                                     final_chunk, _ = universal_converter.convert_chunk(internal_chunk, original_format, "openai", model)
                                     if not final_chunk:
-                                        logger.debug("块转换(->客户端)后为空，跳过")
                                         continue
-                                    logger.debug(f"准备发送给客户端的最终块: {json.dumps(final_chunk, indent=2, ensure_ascii=False)}")
                                     
                                     yield f"data: {json.dumps(final_chunk)}\n\n".encode()
 
@@ -453,12 +448,11 @@ class ChatProcessor:
 
                             except json.JSONDecodeError:
                                 # JSON仍然不完整，继续缓冲
-                                logger.debug(f"缓冲区JSON不完整，继续缓冲: '{buffer}'")
                                 pass
                 
             yield b"data: [DONE]\n\n"
         except httpx.RequestError as e:
-            logger.error(f"[ChatProcessor] Upstream request failed: {e}", exc_info=True)
+            logger.error(f"[ChatProcessor] 上游请求失败: {e}", exc_info=True)
             error_message = f"无法连接到上游服务: {type(e).__name__}"
             converted_error = ErrorConverter.convert_upstream_error(error_message.encode(), 502, "openai", original_format)
             yield f"data: {json.dumps(converted_error)}\n\n".encode()

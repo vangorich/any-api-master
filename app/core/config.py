@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     # Application
     VERSION: str = "1.0.0"
     VITE_API_STR: str = "/api"
+    DEBUG: bool = False
     
     # Security
     SECRET_KEY: str = "your-super-secret-key-change-it-in-production"

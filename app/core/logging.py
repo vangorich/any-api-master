@@ -1,30 +1,71 @@
 import logging
+import logging.config
 import sys
+from app.core.config import settings
 
 def setup_logging():
     """
     配置全局日志记录器。
+    统一管理应用和 Uvicorn 日志，使用统一的格式：
+    时间 | 日志等级 | 模块名 | 中文日志内容
     """
-    # 获取根记录器
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG) # 设置为DEBUG级别以显示所有日志
+    
+    # 定义日志格式
+    log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
 
-    # 移除所有现有的处理器，以避免重复日志
-    if root_logger.hasHandlers():
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
+    # 确定日志等级
+    log_level = "DEBUG" if settings.DEBUG else "INFO"
 
-    # 创建一个新的流处理器
-    stream_handler = logging.StreamHandler(sys.stdout)
-    
-    # 创建格式化器，加入级别和模块名
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # 将格式化器添加到处理器
-    stream_handler.setFormatter(formatter)
-    
-    # 将处理器添加到根记录器
-    root_logger.addHandler(stream_handler)
+    logging_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "standard": {
+                "format": log_format,
+                "datefmt": date_format,
+            },
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "standard",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            # 应用根日志
+            "app": {
+                "handlers": ["console"],
+                "level": log_level,
+                "propagate": False,
+            },
+            # Uvicorn 访问日志
+            "uvicorn.access": {
+                "handlers": ["console"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            # Uvicorn 错误日志
+            "uvicorn.error": {
+                "handlers": ["console"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            # 根日志 (捕获其他库的日志)
+            "": {
+                "handlers": ["console"],
+                "level": "INFO", # 默认 INFO，避免第三方库 DEBUG 刷屏
+            },
+        },
+    }
+
+    try:
+        logging.config.dictConfig(logging_config)
+        # 强制设置根 logger 级别，以防 dictConfig 没生效
+        logging.getLogger().setLevel(log_level) 
+        logging.info(f"日志系统初始化完成。当前等级: {log_level}")
+    except Exception as e:
+        # 如果配置失败，回退到简单配置
+        logging.basicConfig(level=logging.INFO)
+        logging.error(f"日志配置加载失败: {e}")
