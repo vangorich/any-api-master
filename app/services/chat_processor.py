@@ -392,6 +392,24 @@ class ChatProcessor:
                             if potential_json.startswith('data:'):
                                 potential_json = potential_json[5:].strip()
                             
+                            # 处理 SSE "event: " 行 (Claude 等)
+                            if "event: " in potential_json:
+                                lines = potential_json.split('\n')
+                                valid_lines = []
+                                for line in lines:
+                                    line = line.strip()
+                                    if line.startswith("data:"):
+                                        valid_lines.append(line[5:].strip())
+                                    elif line.startswith("{") or line.startswith("["):
+                                        valid_lines.append(line)
+                                
+                                if valid_lines:
+                                    potential_json = "".join(valid_lines)
+                                else:
+                                    if not potential_json.strip().startswith("{") and not potential_json.strip().startswith("["):
+                                         buffer = ""
+                                         continue
+
                             if not potential_json or potential_json == '[DONE]':
                                 buffer = ""
                                 continue
