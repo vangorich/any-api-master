@@ -40,7 +40,11 @@ class ChatProcessor:
         start_time = time.time()
         body_bytes = await request.body()
         body = json.loads(body_bytes)
-        target_format = "gemini"
+        
+        # 动态确定目标格式
+        target_format = "gemini" # 默认值
+        if official_key.channel and official_key.channel.type:
+            target_format = official_key.channel.type.lower()
 
         converted_body, original_format = await universal_converter.convert_request(body, "openai", request=request)
         
@@ -220,12 +224,25 @@ class ChatProcessor:
         self, payload: Dict, upstream_format: ApiFormat, original_format: ApiFormat, model: str,
         official_key: OfficialKey, global_rules: List, local_rules: List
     ) -> Tuple[Dict, int, ApiFormat]:
-        base_url = settings.GEMINI_BASE_URL
+        # 动态构建请求
+        base_url = ""
+        if upstream_format == "gemini":
+            base_url = settings.GEMINI_BASE_URL
+        elif upstream_format == "claude":
+            base_url = "https://api.anthropic.com"
+        elif upstream_format == "openai":
+            base_url = "https://api.openai.com"
+
         if official_key.channel and official_key.channel.api_url:
             base_url = official_key.channel.api_url.rstrip('/')
-        
-        target_url = f"{base_url}/v1beta/models/{model}:generateContent"
-        headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key}
+
+        target_url, headers = self._build_request_params(
+            base_url=base_url,
+            upstream_format=upstream_format,
+            model=model,
+            official_key=official_key.key,
+            is_stream=False
+        )
         
         response = await self.client.post(target_url, json=payload, headers=headers)
         
@@ -292,12 +309,25 @@ class ChatProcessor:
         self, payload: Dict, upstream_format: ApiFormat, original_format: ApiFormat, model: str,
         official_key: OfficialKey, global_rules: List, local_rules: List
     ) -> AsyncGenerator[bytes, None]:
-        base_url = settings.GEMINI_BASE_URL
+        # 动态构建请求
+        base_url = ""
+        if upstream_format == "gemini":
+            base_url = settings.GEMINI_BASE_URL
+        elif upstream_format == "claude":
+            base_url = "https://api.anthropic.com"
+        elif upstream_format == "openai":
+            base_url = "https://api.openai.com"
+
         if official_key.channel and official_key.channel.api_url:
             base_url = official_key.channel.api_url.rstrip('/')
-
-        target_url = f"{base_url}/v1beta/models/{model}:streamGenerateContent"
-        headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key}
+        
+        target_url, headers = self._build_request_params(
+            base_url=base_url,
+            upstream_format=upstream_format,
+            model=model,
+            official_key=official_key.key,
+            is_stream=True
+        )
 
         try:
             async with self.client.stream("POST", target_url, json=payload, headers=headers) as response:
@@ -338,5 +368,26 @@ class ChatProcessor:
             converted_error = ErrorConverter.convert_upstream_error(error_message.encode(), 502, "openai", original_format)
             yield f"data: {json.dumps(converted_error)}\n\n".encode()
             yield b"data: [DONE]\n\n"
+
+    def _build_request_params(self, base_url: str, upstream_format: str, model: str, official_key: str, is_stream: bool) -> Tuple[str, Dict]:
+        """根据目标平台构建URL和Headers"""
+        headers = {"Content-Type": "application/json"}
+        target_url = ""
+
+        if upstream_format == "gemini":
+            action = "streamGenerateContent" if is_stream else "generateContent"
+            target_url = f"{base_url}/v1beta/models/{model}:{action}"
+            headers["x-goog-api-key"] = official_key
+        
+        elif upstream_format == "claude":
+            target_url = f"{base_url}/v1/messages"
+            headers["x-api-key"] = official_key
+            headers["anthropic-version"] = "2023-06-01"
+
+        elif upstream_format == "openai":
+            target_url = f"{base_url}/v1/chat/completions"
+            headers["Authorization"] = f"Bearer {official_key}"
+            
+        return target_url, headers
 
 chat_processor = ChatProcessor()

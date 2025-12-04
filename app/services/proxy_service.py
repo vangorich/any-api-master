@@ -138,7 +138,13 @@ class ProxyService:
         background_tasks: BackgroundTasks = None
     ):
         official_key = official_key_obj.key
-        target_provider = self.identify_target_provider(official_key)
+        
+        # 优先根据渠道类型决定目标服务商
+        if official_key_obj.channel and official_key_obj.channel.type:
+            target_provider = official_key_obj.channel.type.lower()
+        else:
+            target_provider = self.identify_target_provider(official_key)
+            
         masked_key = f"{official_key[:8]}...{official_key[-4:]}" if len(official_key) > 12 else "***"
         
         # 使用 print 确保在所有环境下可见
