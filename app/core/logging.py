@@ -63,6 +63,12 @@ def setup_logging(log_level: str = None):
                 "handlers": ["console"],
                 "level": "INFO", # 默认 INFO，避免第三方库 DEBUG 刷屏
             },
+            # 特别处理 aiosqlite，避免其在 DEBUG 模式下刷屏
+            "aiosqlite": {
+                "handlers": ["console"],
+                "level": "WARNING",
+                "propagate": False,
+            },
         },
     }
 
