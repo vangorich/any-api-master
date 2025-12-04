@@ -145,7 +145,25 @@ class ProxyService:
         logger.info(f"公开代理接收到客户端请求: {request.url}")
         logger.info(f"请求转换: 客户端格式 ({incoming_format}) -> 目标格式 ({target_provider})")
 
-        # Always use the conversion handler as it's now generalized
+        # 检查是否为明确需要转换的聊天/生成类请求
+        # 注意: claude的messages, openai的chat/completions, gemini的generateContent
+        is_generation_path = "generateContent" in path or "chat/completions" in path or "messages" in path
+
+        # 如果是GET请求，或者来源和目标提供商相同且不是一个明确的生成类请求，
+        # 则认为可以安全地直接透传。
+        if request.method == "GET" or (incoming_format == target_provider and not is_generation_path):
+            logger.info(f"[Proxy] 检测到GET请求或同构非生成类请求，执行直接透传: {path}")
+            return await self._handle_passthrough(
+                request=request,
+                db=db,
+                path=path,
+                key_obj=official_key_obj,
+                user=user,
+                provider=target_provider
+            )
+
+        # 对于异构请求或需要复杂处理的同构生成请求，使用转换处理器
+        logger.info(f"[Proxy] 异构或生成类请求，执行转换处理。")
         return await self._handle_conversion(
             request=request,
             db=db,
@@ -226,13 +244,21 @@ class ProxyService:
         request_model = "unknown"
         is_stream = False
         messages = []
-        try:
-            request_data = json.loads(body)
-            request_model = request_data.get("model", "unknown")
-            is_stream = request_data.get("stream", False)
-            messages = request_data.get("messages", [])
-        except:
-            pass
+        request_model = "unknown"
+        is_stream = False
+        messages = []
+        if body:
+            try:
+                request_data = json.loads(body)
+                request_model = request_data.get("model", "unknown")
+                is_stream = request_data.get("stream", False)
+                # Passthrough might not have 'messages' but 'contents' for gemini
+                messages = request_data.get("messages", request_data.get("contents", []))
+            except json.JSONDecodeError:
+                logger.warning("[Proxy] Passthrough request has a non-JSON body.")
+                pass
+        else:
+            logger.debug("[Proxy] Passthrough request has no body (e.g., GET request).")
 
         log_entry = await self._create_initial_log(db, key_obj, user, request_model, is_stream, messages)
 
