@@ -11,6 +11,8 @@ from app.models.log import Log
 from app.models.key import ExclusiveKey
 from app.schemas.system_config import SystemConfig, SystemConfigUpdate
 from sqlalchemy import func, desc
+from app.core.logging import setup_logging
+import logging
 
 router = APIRouter()
 
@@ -173,6 +175,14 @@ async def update_system_config(
     await db.commit()
     await db.refresh(config)
     
+    # 如果日志等级发生变化，立即应用新的日志设置
+    if config_in.log_level:
+        try:
+            setup_logging(log_level=config_in.log_level)
+            logging.info(f"管理员已更新日志等级为: {config_in.log_level}")
+        except Exception as e:
+            logging.error(f"应用新日志等级失败: {e}")
+
     # 返回完整配置
     return {
         "id": config.id,

@@ -3,11 +3,14 @@ import logging.config
 import sys
 from app.core.config import settings
 
-def setup_logging():
+def setup_logging(log_level: str = None):
     """
     配置全局日志记录器。
     统一管理应用和 Uvicorn 日志，使用统一的格式：
     时间 | 日志等级 | 模块名 | 中文日志内容
+    
+    :param log_level: 可选的日志等级 (DEBUG, INFO, WARNING, ERROR, CRITICAL)。
+                      如果未提供，则根据 settings.DEBUG 自动决定 (DEBUG/INFO)。
     """
     
     # 定义日志格式
@@ -15,7 +18,10 @@ def setup_logging():
     date_format = "%Y-%m-%d %H:%M:%S"
 
     # 确定日志等级
-    log_level = "DEBUG" if settings.DEBUG else "INFO"
+    if not log_level:
+        log_level = "DEBUG" if settings.DEBUG else "INFO"
+    
+    log_level = log_level.upper()
 
     logging_config = {
         "version": 1,

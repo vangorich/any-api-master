@@ -12,7 +12,7 @@ import asyncio
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 配置日志
+    # 初始配置日志 (使用默认设置，直到数据库加载完成)
     setup_logging()
     logging.info("应用启动，开始配置...")
 
@@ -29,12 +29,19 @@ async def lifespan(app: FastAPI):
     try:
         stmt = select(SystemConfig)
         config = (await db.execute(stmt)).scalars().first()
-        if config and config.site_name:
-            app.title = config.site_name
-            logging.info(f"站点名称已加载: {app.title}")
+        if config:
+            # 加载站点名称
+            if config.site_name:
+                app.title = config.site_name
+                logging.info(f"站点名称已加载: {app.title}")
+            
+            # 加载日志配置并重新应用
+            if config.log_level:
+                setup_logging(log_level=config.log_level)
+                logging.info(f"已根据系统配置更新日志等级为: {config.log_level}")
         else:
             app.title = "Any API"
-            logging.info("未找到站点名称，使用默认值 'Any API'")
+            logging.info("未找到系统配置，使用默认值")
     except Exception as e:
         logging.warning(f"无法加载系统配置: {e}")
         logging.warning("提示: 如果这是首次运行,请执行: python migrate.py upgrade")
