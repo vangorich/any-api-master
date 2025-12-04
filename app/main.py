@@ -9,7 +9,7 @@ from app.models.system_config import SystemConfig
 from app.core.database import get_db
 from sqlalchemy import select
 import asyncio
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseCall
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -77,7 +77,7 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 # 注册一个中间件来捕获 CancelledError
 class CancelledRequestMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: RequestResponseCall) -> Response:
+    async def dispatch(self, request: Request, call_next) -> Response:
         try:
             return await call_next(request)
         except asyncio.CancelledError:
