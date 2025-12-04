@@ -4,11 +4,12 @@ from typing import List, Dict, Any
 # 定义 Gemini API 的所有已知危害类别
 # 参考: https://cloud.google.com/vertex-ai/docs/generative-ai/multimodal/configure-safety-attributes
 ALL_HARM_CATEGORIES = [
-    # 根据 Gemini API (v1beta) 的错误响应，仅保留支持的类别
+    # 根据 Gemini API (v1beta) 的错误响应，精确设置支持的类别
     "HARM_CATEGORY_HARASSMENT",
     "HARM_CATEGORY_HATE_SPEECH",
     "HARM_CATEGORY_SEXUALLY_EXPLICIT",
     "HARM_CATEGORY_DANGEROUS_CONTENT",
+    "HARM_CATEGORY_CIVIC_INTEGRITY",
 ]
 
 # 定义安全阈值
