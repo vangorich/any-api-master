@@ -41,28 +41,6 @@ async def list_models(
     return await proxy_service.get_and_transform_models(request=request, db=db, official_key=official_key, target_format="openai")
 
 
-@router.api_route("/v1beta/{path:path}", methods=["POST", "PUT", "DELETE", "GET"])
-async def proxy_beta_requests(
-    request: Request,
-    path: str,
-    db: AsyncSession = Depends(deps.get_db),
-    key_info: tuple = Depends(deps.get_official_key_from_proxy)
-):
-    """
-    通用代理，处理 /v1beta/ 下的所有请求，并交由 ProxyService 处理以实现日志记录。
-    """
-    official_key, user = key_info
-
-    # 假设所有到 v1beta 的请求都意图发往 gemini
-    return await proxy_service.smart_proxy_handler(
-        request=request,
-        db=db,
-        path=path,
-        official_key_obj=official_key,
-        user=user,
-        incoming_format="gemini"
-    )
-
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
