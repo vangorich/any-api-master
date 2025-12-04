@@ -42,6 +42,7 @@ class ChatProcessor:
         start_time = time.time()
         body_bytes = await request.body()
         body = json.loads(body_bytes)
+        logger.debug(f"客户端原始请求体: {json.dumps(body, indent=2, ensure_ascii=False)}")
         
         # The target format is determined by the channel configuration
         target_format = "gemini" # Default value
@@ -67,6 +68,7 @@ class ChatProcessor:
         presets, regex_rules, preset_regex_rules = await self._load_context(db, exclusive_key)
         openai_request = self._apply_preprocessing(openai_request, presets, regex_rules, preset_regex_rules)
         final_payload, _ = await universal_converter.convert_request(openai_request.dict(), target_format)
+        logger.debug(f"发送到上游的最终请求体: {json.dumps(final_payload, indent=2, ensure_ascii=False)}")
         
         if openai_request.stream:
             return self._logged_stream_generator(
@@ -281,6 +283,8 @@ class ChatProcessor:
             return final_response, 200, original_format
         
         logger.info(f"响应转换: 上游格式 ({upstream_format}) -> 内部格式 (openai) -> 客户端格式 ({original_format})")
+        logger.debug(f"从上游接收的原始响应体: {json.dumps(upstream_response, indent=2, ensure_ascii=False)}")
+        logger.debug(f"准备发送给客户端的最终响应体: {json.dumps(internal_response, indent=2, ensure_ascii=False)}")
         return internal_response, 200, original_format
 
     async def _logged_stream_generator(self, generator: AsyncGenerator, db: AsyncSession, log_entry: Log, official_key: OfficialKey, start_time: float):
@@ -359,42 +363,80 @@ class ChatProcessor:
                     yield b"data: [DONE]\n\n"
                     return
 
-                # --- Unified Stream Parsing Logic ---
-                # Third-party APIs mimicking Gemini/Claude often return standard OpenAI SSE streams.
-                # A unified parser is more robust.
-                async for line in response.aiter_lines():
-                    if not line.startswith('data: '):
-                        continue
+                # --- Brace-Matching Buffered Stream Parser ---
+                buffer = ""
+                brace_counter = 0
+                in_string = False
+                
+                async for raw_chunk in response.aiter_raw():
+                    decoded_chunk = raw_chunk.decode('utf-8')
                     
-                    content_str = line[6:]
-                    if content_str.strip() == '[DONE]':
-                        continue
+                    # 逐字符处理以正确处理流中的多个JSON对象
+                    for char in decoded_chunk:
+                        buffer += char
                         
-                    try:
-                        # Regardless of the source format, we parse the JSON chunk.
-                        upstream_chunk = json.loads(content_str)
+                        if char == '"' and (len(buffer) == 1 or buffer[-2] != '\\'):
+                            in_string = not in_string
+                        elif not in_string:
+                            if char == '{':
+                                brace_counter += 1
+                            elif char == '}':
+                                brace_counter -= 1
                         
-                        # Convert the upstream chunk to our internal representation (OpenAI format).
-                        # The converter knows how to handle chunks from different providers.
-                        internal_chunk, _ = universal_converter.convert_chunk(upstream_chunk, "openai", upstream_format, model)
-                        
-                        # If conversion results in a valid chunk, apply post-processing.
-                        if internal_chunk and internal_chunk.get('choices') and internal_chunk['choices'][0]['delta'].get('content'):
-                            content = internal_chunk['choices'][0]['delta']['content']
-                            # Note: Post-processing on a stream is complex.
-                            # Here we apply it to each content fragment.
-                            processed_content = self._apply_postprocessing(content, global_rules, local_rules)
-                            internal_chunk['choices'][0]['delta']['content'] = processed_content
-                        
-                        # Convert from our internal representation to the format the original client expects.
-                        final_chunk, _ = universal_converter.convert_chunk(internal_chunk, original_format, "openai", model)
-                        
-                        if final_chunk:
-                            yield f"data: {json.dumps(final_chunk)}\n\n".encode()
+                        # 当括号匹配且缓冲区不为空时，尝试解析
+                        if brace_counter == 0 and not in_string and buffer.strip():
+                            # 缓冲区可能包含一个或多个完整的JSON对象
+                            potential_json = buffer.strip()
+                            
+                            # 兼容 SSE "data: " 前缀
+                            if potential_json.startswith('data:'):
+                                potential_json = potential_json[5:].strip()
+                            
+                            if not potential_json or potential_json == '[DONE]':
+                                buffer = ""
+                                continue
 
-                    except json.JSONDecodeError:
-                        logger.warning(f"[ChatProcessor] Failed to decode stream chunk: {content_str}")
-                        continue
+                            try:
+                                upstream_chunks = []
+                                # Gemini 流可能会返回一个JSON数组
+                                if potential_json.startswith('[') and potential_json.endswith(']'):
+                                    parsed_data = json.loads(potential_json)
+                                    upstream_chunks.extend(parsed_data)
+                                else:
+                                    upstream_chunks.append(json.loads(potential_json))
+
+                                for upstream_chunk in upstream_chunks:
+                                    logger.debug(f"从上游接收并成功解析的块: {json.dumps(upstream_chunk, indent=2, ensure_ascii=False)}")
+
+                                    # 1. 转换为内部格式 (OpenAI)
+                                    internal_chunk, _ = universal_converter.convert_chunk(upstream_chunk, "openai", upstream_format, model)
+                                    if not internal_chunk:
+                                        logger.debug("块转换(->openai)后为空，跳过")
+                                        continue
+                                    logger.debug(f"转换为内部格式 (openai) 的块: {json.dumps(internal_chunk, indent=2, ensure_ascii=False)}")
+                                    
+                                    # 2. 应用后处理
+                                    if internal_chunk.get('choices') and internal_chunk['choices'][0].get('delta', {}).get('content'):
+                                        content = internal_chunk['choices'][0]['delta']['content']
+                                        processed_content = self._apply_postprocessing(content, global_rules, local_rules)
+                                        internal_chunk['choices'][0]['delta']['content'] = processed_content
+                                    
+                                    # 3. 转换为最终客户端格式
+                                    final_chunk, _ = universal_converter.convert_chunk(internal_chunk, original_format, "openai", model)
+                                    if not final_chunk:
+                                        logger.debug("块转换(->客户端)后为空，跳过")
+                                        continue
+                                    logger.debug(f"准备发送给客户端的最终块: {json.dumps(final_chunk, indent=2, ensure_ascii=False)}")
+                                    
+                                    yield f"data: {json.dumps(final_chunk)}\n\n".encode()
+
+                                # 清空缓冲区
+                                buffer = ""
+
+                            except json.JSONDecodeError:
+                                # JSON仍然不完整，继续缓冲
+                                logger.debug(f"缓冲区JSON不完整，继续缓冲: '{buffer}'")
+                                pass
                 
             yield b"data: [DONE]\n\n"
         except httpx.RequestError as e:

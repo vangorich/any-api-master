@@ -92,18 +92,50 @@ class UniversalConverter:
         转换单个流式块。
         返回 (转换后的块, 是否为结束块)
         """
+        # 如果来源和目标格式相同，直接透传
         if from_provider == to_format:
-            return chunk, False # Passthrough, we don't know if it's the end
+            choices = chunk.get("choices", [])
+            is_done = bool(choices and choices[0].get("finish_reason"))
+            return chunk, is_done
 
-        converter_func = getattr(self, f"{from_provider}_to_{to_format}_chunk", None)
-        if not callable(converter_func):
-            # Fallback for simplicity, just wrap it
-            return {"converted_chunk": chunk}, False
-
-        converted = converter_func(chunk, original_model)
-        is_done = converted.get("choices", [{}])[0].get("finish_reason") is not None
+        # 统一转换路径： from_provider -> openai -> to_format
         
-        return converted, is_done
+        # 1. 从源格式转换到OpenAI格式
+        openai_chunk = chunk
+        if from_provider != "openai":
+            from_converter_func = getattr(self, f"{from_provider}_to_openai_chunk", None)
+            if callable(from_converter_func):
+                openai_chunk = from_converter_func(chunk, original_model)
+            else:
+                # 如果没有实现转换，则返回一个空块，避免下游出错
+                return {}, False
+
+        # 如果目标就是OpenAI，直接返回
+        if to_format == "openai":
+            choices = openai_chunk.get("choices", [])
+            is_done = bool(choices and choices[0].get("finish_reason"))
+            return openai_chunk, is_done
+
+        # 2. 从OpenAI格式转换到目标格式
+        final_chunk = openai_chunk
+        to_converter_func = getattr(self, f"openai_chunk_to_{to_format}_chunk", None)
+        if callable(to_converter_func):
+            # 注意：openai_to_xxx_chunk 通常不需要 model 参数
+            final_chunk = to_converter_func(openai_chunk)
+        else:
+            # 如果没有实现转换，则返回一个空块
+            return {}, False
+            
+        # 在最终块中判断是否结束
+        is_done = False
+        if to_format == "gemini":
+            # Gemini的结束判断
+            candidates = final_chunk.get("candidates", [])
+            if candidates and candidates[0].get("finishReason") is not None:
+                is_done = True
+        # 其他格式可以添加自己的判断逻辑
+        
+        return final_chunk, is_done
 
     # --- OpenAI <-> Gemini ---
     
@@ -513,63 +545,139 @@ class UniversalConverter:
         }
 
     def openai_chunk_to_gemini_chunk(self, chunk: Dict[str, Any]) -> Dict[str, Any]:
-        """将OpenAI流式块转换为Gemini格式"""
-        # OpenAI Chunk: {"choices": [{"delta": {"content": "..."}}]}
-        # Gemini Chunk: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
+        """将OpenAI流式块转换为Gemini格式 (重写后)"""
+        # OpenAI Chunk: {"choices": [{"delta": {"content": "...", "role": "assistant"}, "finish_reason": "stop"}]}
+        # Gemini Chunk: {"candidates": [{"content": {"parts": [{"text": "..."}], "role": "model"}, "finishReason": "STOP"}]}
         
-        candidates = []
-        if "choices" in chunk:
-            for choice in chunk["choices"]:
-                delta = choice.get("delta", {})
-                parts = []
-                
-                content = delta.get("content")
-                if content:
-                    parts.append({"text": content})
-                    
-                if "reasoning_content" in delta:
-                     parts.append({"thought": delta["reasoning_content"]}) # Custom extension for now
+        choices = chunk.get("choices")
+        if not choices:
+            # 如果块不包含 choices 或 choices 为空列表，则安全跳过
+            return {}
 
-                # TODO: Handle tool_calls in stream if needed
+        choice = choices[0]
+        delta = choice.get("delta", {})
+        
+        parts = []
+        role = None
+        
+        # 1. 处理内容
+        if "content" in delta and delta["content"]:
+            parts.append({"text": delta["content"]})
+            
+        # 2. 处理工具调用
+        if "tool_calls" in delta:
+            for tool_call in delta["tool_calls"]:
+                function_call = tool_call.get("function", {})
+                parts.append({
+                    "functionCall": {
+                        "name": function_call.get("name"),
+                        "args": json.loads(function_call.get("arguments", "{}"))
+                    }
+                })
 
-                if parts:
-                    candidates.append({
-                        "content": {
-                            "parts": parts,
-                            "role": "model"
-                        }
-                    })
-                    
-                # finish_reason
-                if choice.get("finish_reason"):
-                     # 如果是结束块，Gemini 有时会在最后一个块发送 finishReason
-                     # 但通常流式中间块不需要 finishReason，除非结束
-                     finish_reason = "STOP"
-                     if choice["finish_reason"] == "length": finish_reason = "MAX_TOKENS"
-                     
-                     # 查找或创建 candidate
-                     if not candidates:
-                         candidates.append({"content": {"parts": [], "role": "model"}})
-                     
-                     candidates[0]["finishReason"] = finish_reason
+        # 3. 处理角色 (通常只在第一个块中出现)
+        if "role" in delta:
+            role = "model" if delta["role"] == "assistant" else delta["role"]
 
-        return {"candidates": candidates}
+        # 只有当有实际内容（parts）或角色信息时，才构建 candidate
+        if not parts and not role:
+            # 如果块中只有 finish_reason，我们也需要发送它
+            if not choice.get("finish_reason"):
+                return {}
+        
+        candidate = {
+            "content": {"parts": parts},
+            "index": choice.get("index", 0)
+        }
+        
+        if role:
+            candidate["content"]["role"] = role
+
+        # 4. 处理结束原因
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
+            gemini_reason = "STOP"
+            if finish_reason == "length":
+                gemini_reason = "MAX_TOKENS"
+            elif finish_reason == "tool_calls":
+                # Gemini 在工具调用后通常也是 STOP
+                gemini_reason = "STOP"
+            candidate["finishReason"] = gemini_reason
+
+        return {"candidates": [candidate]}
 
     def claude_to_openai_chunk(self, chunk: Dict[str, Any], model: str) -> Dict[str, Any]:
         """将Claude流式块转换为OpenAI格式"""
-        # Claude流式响应需要特殊处理
-        # 例如: event: message_delta, data: {"type":"message_delta",...}
-        delta_content = ""
-        if chunk.get("type") == "content_block_delta":
-            delta_content = chunk.get("delta", {}).get("text", "")
-
-        return {
-            "id": f"chatcmpl-{uuid.uuid4()}",
+        # Claude的流式响应是事件驱动的，需要处理多种事件类型
+        event_type = chunk.get("type")
+        
+        # 创建一个基础的OpenAI chunk结构
+        openai_chunk = {
+            "id": f"chatcmpl-claude-{uuid.uuid4().hex[:8]}",
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
-            "choices": [{"index": 0, "delta": {"content": delta_content}, "finish_reason": None}]
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": None
+            }]
         }
+
+        if event_type == "message_start":
+            # message_start 事件通常包含角色信息，可以用于初始化
+            role = chunk.get("message", {}).get("role", "assistant")
+            openai_chunk["choices"][0]["delta"] = {"role": role}
+            return openai_chunk
+
+        elif event_type == "content_block_delta":
+            # 这是内容增量事件
+            delta_text = chunk.get("delta", {}).get("text", "")
+            if delta_text:
+                openai_chunk["choices"][0]["delta"] = {"content": delta_text}
+            else:
+                # 如果没有文本，返回一个空delta，避免发送空消息
+                return {}
+            return openai_chunk
+
+        elif event_type == "message_delta":
+            # message_delta 事件包含停止原因
+            finish_reason = None
+            stop_reason = chunk.get("delta", {}).get("stop_reason")
+            if stop_reason == "end_turn":
+                finish_reason = "stop"
+            elif stop_reason == "max_tokens":
+                finish_reason = "length"
+            elif stop_reason == "tool_use":
+                finish_reason = "tool_calls"
+            
+            if finish_reason:
+                openai_chunk["choices"][0]["finish_reason"] = finish_reason
+            
+            # 这个事件也可能包含使用情况统计
+            usage = chunk.get("usage", {})
+            if usage:
+                # 这个信息在流式中通常不直接发送，但可以记录
+                pass
+            
+            # 如果只有finish_reason，delta可以为空
+            if not openai_chunk["choices"][0]["delta"]:
+                 openai_chunk["choices"][0]["delta"] = {}
+
+            return openai_chunk
+
+        elif event_type == "message_stop":
+            # 这是流结束的明确信号
+            # 通常在 message_delta 中已经处理了 finish_reason，但这个可以作为补充
+            # 发送一个最终的、带有 finish_reason 的空 delta 块
+            if openai_chunk["choices"][0]["finish_reason"] is None:
+                openai_chunk["choices"][0]["finish_reason"] = "stop"
+            openai_chunk["choices"][0]["delta"] = {}
+            return openai_chunk
+            
+        # 对于 content_block_start, content_block_stop 等其他事件，我们目前忽略
+        # 因为它们不直接产生给客户端的内容。返回一个空字典表示这个chunk不生成输出。
+        return {}
         
 
 # 创建单例

@@ -318,11 +318,14 @@ class ProxyService:
         try:
             body_bytes = await request.body()
             body = json.loads(body_bytes) if body_bytes else {}
+            body = json.loads(body_bytes) if body_bytes else {}
+            logger.debug(f"[Proxy] 客户端原始请求体: {json.dumps(body, indent=2, ensure_ascii=False)}")
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
 
         # 2. 转换请求体 (Incoming -> Target)
         converted_body, _ = await universal_converter.convert_request(body, target_provider, request)
+        logger.debug(f"[Proxy] 发送到上游的最终请求体: {json.dumps(converted_body, indent=2, ensure_ascii=False)}")
         
         # 3. 确定目标 URL 和 Method
         target_url = ""
@@ -420,7 +423,10 @@ class ProxyService:
                 output_tokens = 0
                 try:
                     resp_json = json.loads(resp_content)
+                    resp_json = json.loads(resp_content)
+                    logger.debug(f"[Proxy] 从上游接收的原始响应体: {json.dumps(resp_json, indent=2, ensure_ascii=False)}")
                     final_response, _ = universal_converter.convert_response(resp_json, incoming_format, target_provider, original_model)
+                    logger.debug(f"[Proxy] 准备发送给客户端的最终响应体: {json.dumps(final_response, indent=2, ensure_ascii=False)}")
                     
                     # Recalculate output_tokens from actual response
                     tokenizer = get_tokenizer(original_model)
@@ -485,36 +491,56 @@ class ProxyService:
 
 
     async def _stream_converter(self, response: httpx.Response, from_provider: str, to_format: str, original_model: str):
-        """流式响应转换生成器"""
+        """流式响应转换生成器 (重构后)"""
         logger.info(f"响应转换 (流式): 上游格式 ({from_provider}) -> 客户端格式 ({to_format})")
         buffer = ""
+        brace_counter = 0
+        in_string = False
         try:
-            async for line in response.aiter_lines():
-                # This logic is simplified to handle Gemini's typical stream format
-                if line.startswith('data: '):
-                    line = line[6:]
-                
-                buffer += line
-                
-                try_parse = buffer.strip()
-                if try_parse.startswith('[') and not try_parse.endswith(']'): continue
-                if try_parse.startswith('{') and not try_parse.endswith('}'): continue
+            async for raw_chunk in response.aiter_raw():
+                decoded_chunk = raw_chunk.decode('utf-8')
+                for char in decoded_chunk:
+                    buffer += char
+                    if char == '"' and (len(buffer) == 1 or buffer[-2] != '\\'):
+                        in_string = not in_string
+                    elif not in_string:
+                        if char == '{':
+                            brace_counter += 1
+                        elif char == '}':
+                            brace_counter -= 1
+                    
+                    if brace_counter == 0 and not in_string and buffer.strip():
+                        potential_json = buffer.strip()
+                        if potential_json.startswith('data:'):
+                            potential_json = potential_json[5:].strip()
+                        
+                        if not potential_json or potential_json == '[DONE]':
+                            buffer = ""
+                            continue
 
-                try:
-                    data = json.loads(try_parse)
-                    chunks = data if isinstance(data, list) else [data]
-                    
-                    for chunk in chunks:
-                        converted_chunk, _ = universal_converter.convert_chunk(chunk, to_format, from_provider, original_model)
-                        if converted_chunk:
-                            yield f"data: {json.dumps(converted_chunk)}\n\n"
-                    
-                    buffer = "" # Reset buffer after successful processing
-                except json.JSONDecodeError:
-                    # Incomplete JSON, continue buffering
-                    pass
+                        try:
+                            upstream_chunks = []
+                            if potential_json.startswith('[') and potential_json.endswith(']'):
+                                upstream_chunks.extend(json.loads(potential_json))
+                            else:
+                                upstream_chunks.append(json.loads(potential_json))
+
+                            for upstream_chunk in upstream_chunks:
+                                logger.debug(f"[Proxy] 从上游接收并成功解析的块: {json.dumps(upstream_chunk, indent=2, ensure_ascii=False)}")
+                                converted_chunk, _ = universal_converter.convert_chunk(
+                                    chunk=upstream_chunk, to_format=to_format, from_provider=from_provider, original_model=original_model
+                                )
+                                if converted_chunk:
+                                    logger.debug(f"[Proxy] 准备发送给客户端的最终块: {json.dumps(converted_chunk, indent=2, ensure_ascii=False)}")
+                                    yield f"data: {json.dumps(converted_chunk)}\n\n"
+                                else:
+                                    logger.debug("[Proxy] 转换后的块为空，跳过")
+                            
+                            buffer = ""
+                        except json.JSONDecodeError:
+                            logger.debug(f"[Proxy] 缓冲区JSON不完整，继续缓冲: '{buffer}'")
+                            pass
             
-            # Final DONE message
             yield "data: [DONE]\n\n"
         except httpx.RequestError as e:
             logger.error(f"[Proxy] Stream conversion request failed: {e}", exc_info=True)
