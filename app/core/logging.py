@@ -3,6 +3,14 @@ import logging.config
 import sys
 from app.core.config import settings
 
+class CenteredFormatter(logging.Formatter):
+    """自定义日志格式化类，用于居中对齐日志级别"""
+    
+    def format(self, record):
+        # 手动将日志级别居中
+        record.levelname = record.levelname.center(8)
+        return super().format(record)
+
 def setup_logging(log_level: str = None):
     """
     配置全局日志记录器。
@@ -13,8 +21,8 @@ def setup_logging(log_level: str = None):
                       如果未提供，则根据 settings.DEBUG 自动决定 (DEBUG/INFO)。
     """
     
-    # 定义日志格式
-    log_format = "%(asctime)s | %(levelname)^8s | %(name)s | %(message)s"
+    # 定义日志格式 (levelname 将由自定义 Formatter 处理)
+    log_format = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
 
     # 确定日志等级
@@ -28,6 +36,7 @@ def setup_logging(log_level: str = None):
         "disable_existing_loggers": False,
         "formatters": {
             "standard": {
+                "()": "app.core.logging.CenteredFormatter", # 使用自定义 Formatter
                 "format": log_format,
                 "datefmt": date_format,
             },
