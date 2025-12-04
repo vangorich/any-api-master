@@ -102,9 +102,18 @@ class ChatProcessor:
                         if content_part != b'[DONE]':
                             try:
                                 json_content = json.loads(content_part)
-                                if json_content.get('choices'):
-                                    delta = json_content['choices'][0].get('delta', {})
-                                    full_response_content += delta.get('content', '')
+                                
+                                # 处理 json_content 可能是列表或字典的情况
+                                content_items = []
+                                if isinstance(json_content, list):
+                                    content_items.extend(json_content)
+                                elif isinstance(json_content, dict):
+                                    content_items.append(json_content)
+
+                                for item in content_items:
+                                    if item.get('choices'):
+                                        delta = item['choices'][0].get('delta', {})
+                                        full_response_content += delta.get('content', '')
                             except json.JSONDecodeError:
                                 pass
                     yield chunk
