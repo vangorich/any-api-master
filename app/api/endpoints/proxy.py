@@ -34,59 +34,10 @@ async def list_models(
     key_info: tuple = Depends(deps.get_official_key_from_proxy)
 ):
     """
-    处理 GET /v1/models 请求，通过代理到 Google API 列出可用模型。
-    如果启用了伪流，则会额外生成带 '伪流/' 前缀的模型。
+    处理 GET /v1/models 请求，现在通过集中的服务来获取模型列表。
     """
     official_key, _ = key_info
-
-    # 1. 获取系统配置
-    result = await db.execute(select(SystemConfig))
-    system_config = result.scalars().first()
-    pseudo_streaming_enabled = system_config.pseudo_streaming_enabled if system_config else True
-
-    # 2. 代理到 Google API
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(
-                "https://generativelanguage.googleapis.com/v1beta/models",
-                params={"key": official_key.key}
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=500, detail=f"请求 Google API 时出错: {e}")
-
-    # 3. 转换响应并添加伪流模型
-    try:
-        gemini_response = response.json()
-        models = gemini_response.get("models", [])
-        
-        openai_models = []
-        for model in models:
-            model_id = model.get("name", "").replace("models/", "")
-            openai_models.append({
-                "id": model_id,
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "google"
-            })
-        
-        # 如果启用了伪流，则添加伪流模型
-        if pseudo_streaming_enabled:
-            pseudo_models = []
-            for model in openai_models:
-                pseudo_model = model.copy()
-                pseudo_model["id"] = f"伪流/{model['id']}"
-                pseudo_models.append(pseudo_model)
-            openai_models.extend(pseudo_models)
-            
-        return {
-            "object": "list",
-            "data": openai_models
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"解析或转换模型列表时出错: {e}")
+    return await proxy_service.get_and_transform_models(db=db, official_key=official_key)
 
 
 @router.api_route("/v1beta/{path:path}", methods=["POST", "PUT", "DELETE", "GET"])

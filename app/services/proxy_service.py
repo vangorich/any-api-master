@@ -16,6 +16,8 @@ from app.models.key import OfficialKey
 from app.models.log import Log
 from app.models.user import User
 from app.models.key import count_tokens_for_messages, get_tokenizer
+from app.models.system_config import SystemConfig
+from sqlalchemy.future import select
 from typing import List, Dict
 
 logger = logging.getLogger(__name__)
@@ -131,6 +133,11 @@ class ProxyService:
         background_tasks: BackgroundTasks = None
     ):
         official_key = official_key_obj.key
+
+        # 拦截对 /v1beta/models 的 GET 请求，并将其重定向到统一的模型处理服务
+        if path == "models" and request.method == "GET":
+            logger.info(f"[Proxy] 拦截到 /v1beta/models 请求，转交统一模型服务处理。")
+            return await self.get_and_transform_models(db=db, official_key=official_key_obj)
         
         # The target provider is determined by the channel configuration
         target_provider = "gemini" # Default value
@@ -599,5 +606,60 @@ class ProxyService:
         else:
             # 对于 OpenAI，我们可能没有持久化的全局 client，或者可以使用一个
             return httpx.AsyncClient(timeout=60.0)
+
+    async def get_and_transform_models(self, db: AsyncSession, official_key: OfficialKey):
+        """
+        获取、转换并根据配置添加伪流模型。
+        这是一个集中的服务，用于处理所有模型列表请求。
+        """
+        # 1. 获取系统配置
+        result = await db.execute(select(SystemConfig))
+        system_config = result.scalars().first()
+        pseudo_streaming_enabled = system_config.pseudo_streaming_enabled if system_config else True
+
+        # 2. 代理到 Google API
+        # 注意：这里硬编码了Google API，未来可以根据 official_key.channel.type 动态化
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    params={"key": official_key.key}
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=500, detail=f"请求上游 API 时出错: {e}")
+
+        # 3. 转换响应并添加伪流模型
+        try:
+            gemini_response = response.json()
+            models = gemini_response.get("models", [])
+            
+            openai_models = []
+            for model in models:
+                model_id = model.get("name", "").replace("models/", "")
+                openai_models.append({
+                    "id": model_id,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "google"
+                })
+            
+            # 如果启用了伪流，则添加伪流模型
+            if pseudo_streaming_enabled:
+                pseudo_models = []
+                for model in openai_models:
+                    pseudo_model = model.copy()
+                    pseudo_model["id"] = f"伪流/{model['id']}"
+                    pseudo_models.append(pseudo_model)
+                openai_models.extend(pseudo_models)
+                
+            return {
+                "object": "list",
+                "data": openai_models
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"解析或转换模型列表时出错: {e}")
 
 proxy_service = ProxyService()
