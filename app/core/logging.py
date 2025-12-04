@@ -9,6 +9,17 @@ class CenteredFormatter(logging.Formatter):
     def format(self, record):
         # 手动将日志级别居中
         record.levelname = record.levelname.center(8)
+        
+        # 优化 Uvicorn 启动日志
+        if "Uvicorn running on" in record.getMessage():
+            message = record.getMessage()
+            if "http://0.0.0.0" in message:
+                record.msg = message.replace("http://0.0.0.0", "http://localhost")
+                record.args = () # 清空原有的 args
+            elif "http://127.0.0.1" in message:
+                record.msg = message.replace("http://127.0.0.1", "http://localhost")
+                record.args = () # 清空原有的 args
+        
         return super().format(record)
 
 def setup_logging(log_level: str = None):
