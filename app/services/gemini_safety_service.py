@@ -23,11 +23,12 @@ ALL_HARM_CATEGORIES = [
 # 参考: https://ai.google.dev/docs/safety_setting_gemini
 class HarmBlockThreshold:
     """安全设置的阈值"""
-    OFF = "OFF"                                                 # 关闭安全过滤
-    BLOCK_ONLY_HIGH = "BLOCK_ONLY_HIGH"                         # 仅在概率较高时屏蔽
-    BLOCK_MEDIUM_AND_ABOVE = "BLOCK_MEDIUM_AND_ABOVE"           # 在概率为中等或更高时屏蔽
-    BLOCK_LOW_AND_ABOVE = "BLOCK_LOW_AND_ABOVE"                 # 在概率为低、中或高时屏蔽
-    HARM_BLOCK_THRESHOLD_UNSPECIFIED = "HARM_BLOCK_THRESHOLD_UNSPECIFIED" # 未指定阈值，使用默认值
+    HARM_BLOCK_THRESHOLD_UNSPECIFIED = "HARM_BLOCK_THRESHOLD_UNSPECIFIED" # 阈值未指定。
+    BLOCK_LOW_AND_ABOVE = "BLOCK_LOW_AND_ABOVE"                 # 内容带有“可忽略”字样，允许使用。
+    BLOCK_MEDIUM_AND_ABOVE = "BLOCK_MEDIUM_AND_ABOVE"           # 内容风险为“可忽略”和“低”时，将允许投放广告。
+    BLOCK_ONLY_HIGH = "BLOCK_ONLY_HIGH"                         # 系统将允许发布风险为“可忽略”“低”和“中”的内容。
+    BLOCK_NONE = "BLOCK_NONE"                                   # 允许所有内容。
+    OFF = "OFF"                                                 # 关闭安全过滤条件。
 
 class GeminiSafetyService:
     def get_default_safety_settings(self) -> List[Dict[str, Any]]:
