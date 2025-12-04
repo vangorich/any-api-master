@@ -400,9 +400,7 @@ class ChatProcessor:
                 brace_counter = 0
                 in_string = False
                 
-                async for raw_chunk in response.aiter_bytes():
-                    decoded_chunk = raw_chunk.decode('utf-8')
-                    
+                async for decoded_chunk in response.aiter_text():
                     # 逐字符处理以正确处理流中的多个JSON对象
                     for char in decoded_chunk:
                         buffer += char
