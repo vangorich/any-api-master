@@ -279,7 +279,8 @@ class UniversalConverter:
                 "temperature": request.temperature,
                 "topP": request.top_p,
                 "maxOutputTokens": request.max_tokens,
-                "stopSequences": request.stop if isinstance(request.stop, list) else [request.stop] if request.stop else []
+                "stopSequences": request.stop if isinstance(request.stop, list) else [request.stop] if request.stop else [],
+                "enableEnhancedCivicAnswers": False
             }
         }
         if system_parts:

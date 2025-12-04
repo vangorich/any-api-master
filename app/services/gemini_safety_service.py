@@ -16,7 +16,6 @@ ALL_HARM_CATEGORIES = [
     "HARM_CATEGORY_HATE_SPEECH",        # 仇恨言论
     "HARM_CATEGORY_SEXUALLY_EXPLICIT",  # 露骨色情内容
     "HARM_CATEGORY_DANGEROUS_CONTENT",  # 危险内容
-    "HARM_CATEGORY_CIVIC_INTEGRITY",    # 损害公民诚信的内容 (已弃用)
 ]
 
 # 定义安全阈值
