@@ -174,7 +174,9 @@ async def chat_completions(
             official_key=official_key,
             exclusive_key=exclusive_key,
             user=user,
-            log_level=log_level
+            log_level=log_level,
+            # For this endpoint, the client is always speaking the "openai" format
+            original_format="openai"
         )
         
         # 根据结果类型返回响应

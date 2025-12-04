@@ -41,11 +41,12 @@ class ChatProcessor:
         body_bytes = await request.body()
         body = json.loads(body_bytes)
         
-        # 动态确定目标格式
-        target_format = "gemini" # 默认值
+        # The target format is determined by the channel configuration
+        target_format = "gemini" # Default value
         if official_key.channel and official_key.channel.type:
             target_format = official_key.channel.type.lower()
 
+        # Convert the incoming request (original_format) to our internal standard (openai)
         converted_body, original_format = await universal_converter.convert_request(body, "openai", request=request)
         
         if model_override:

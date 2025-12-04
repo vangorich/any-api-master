@@ -139,26 +139,27 @@ class ProxyService:
     ):
         official_key = official_key_obj.key
         
-        # 优先根据渠道类型决定目标服务商
+        # The target provider is determined by the channel configuration
+        target_provider = "gemini" # Default value
         if official_key_obj.channel and official_key_obj.channel.type:
             target_provider = official_key_obj.channel.type.lower()
         else:
+            # Fallback for keys not associated with a channel
             target_provider = self.identify_target_provider(official_key)
-            
+
         masked_key = f"{official_key[:8]}...{official_key[-4:]}" if len(official_key) > 12 else "***"
-        
-        # 使用 print 确保在所有环境下可见
-        print(f"DEBUG: [Proxy] Route Decision: Incoming={incoming_format}, Target={target_provider}, Key={masked_key}")
         logger.info(f"[Proxy] Route Decision: Incoming={incoming_format}, Target={target_provider}, Key={masked_key}")
-        
-        # 1. 透传模式 (Pass-through)
-        if incoming_format == target_provider:
-            print(f"DEBUG: [Proxy] Mode: PASS-THROUGH ({target_provider.upper()})")
-            return await self._handle_passthrough(request, db, path, official_key_obj, user, target_provider)
-        
-        # 2. 转换模式 (Conversion)
-        print(f"DEBUG: [Proxy] Mode: CONVERSION ({incoming_format.upper()} -> {target_provider.upper()})")
-        return await self._handle_conversion(request, db, path, official_key_obj, user, incoming_format, target_provider)
+
+        # Always use the conversion handler as it's now generalized
+        return await self._handle_conversion(
+            request=request,
+            db=db,
+            path=path,
+            key_obj=official_key_obj,
+            user=user,
+            incoming_format=incoming_format,
+            target_provider=target_provider
+        )
 
     async def _handle_passthrough(
         self,
@@ -414,7 +415,7 @@ class ProxyService:
 
             if stream:
                 return StreamingResponse(
-                    self._stream_converter_with_logging(response, db, log_entry, target_provider, incoming_format, start_time, original_model), # 转换流维持原状，因为它在内部处理 token
+                    self._stream_converter_with_logging(response, db, log_entry, key_obj, target_provider, incoming_format, start_time, original_model), # 转换流维持原状，因为它在内部处理 token
                     media_type="text/event-stream"
                 )
             else:
@@ -434,11 +435,11 @@ class ProxyService:
                     # Update input tokens if provider gives a more accurate count
                     # This part is now handled by tiktoken initially, but can be refined
                     
-                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, output_tokens)
+                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, output_tokens, latency)
                     return JSONResponse(final_response)
                         
                 except json.JSONDecodeError:
-                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
+                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0, latency)
                     # The response is not valid JSON, but we should still try to inform the client in the right format
                     error_message = f"Upstream service returned non-JSON response with status {response.status_code}"
                     converted_error = ErrorConverter.convert_upstream_error(error_message.encode(), response.status_code, target_provider, incoming_format)
@@ -452,16 +453,39 @@ class ProxyService:
             converted_error = ErrorConverter.convert_upstream_error(error_message.encode(), 502, target_provider, incoming_format)
             return JSONResponse(status_code=502, content=converted_error)
 
-    async def _stream_converter_with_logging(self, response: httpx.Response, db: AsyncSession, log_entry: Log, from_provider: str, to_format: str, start_time: float, original_model: str):
-        """Wrapper for stream_converter that handles logging. It no longer finalizes the log."""
+    async def _stream_converter_with_logging(self, response: httpx.Response, db: AsyncSession, log_entry: Log, key_obj: OfficialKey, from_provider: str, to_format: str, start_time: float, original_model: str):
+        """Wrapper for stream_converter that handles logging."""
+        full_response_content = ""
+        tokenizer = get_tokenizer(original_model)
+        ttft = 0.0
+        first_chunk = True
+        status_code = 200 # Assume success unless an error is found in the stream
         try:
-            async for chunk in self._stream_converter(response, from_provider, to_format, original_model):
-                yield chunk
+            async for chunk_bytes in self._stream_converter(response, from_provider, to_format, original_model):
+                if first_chunk:
+                    ttft = time.time() - start_time
+                    first_chunk = False
+                
+                # Decode for token counting and error checking
+                try:
+                    chunk_str = chunk_bytes.decode('utf-8')
+                    if chunk_str.startswith('data: '):
+                        content_part = chunk_str[6:].strip()
+                        if content_part != '[DONE]':
+                            json_content = json.loads(content_part)
+                            if json_content.get('error'):
+                                status_code = json_content.get('error', {}).get('code', 500)
+                            if json_content.get('choices'):
+                                delta = json_content['choices'][0].get('delta', {})
+                                full_response_content += delta.get('content', '')
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    pass # Ignore non-text/json chunks for logging purposes
+
+                yield chunk_bytes
         finally:
-            # The log is intentionally left in a 'processing' state for streams
-            # to ensure reliability of logging creation. Detailed finalization
-            # for streams is disabled to prevent db session errors.
-            pass
+            latency = time.time() - start_time
+            output_tokens = len(tokenizer.encode(full_response_content))
+            await self._finalize_log(db, log_entry, key_obj, status_code, latency, output_tokens, ttft)
 
 
     async def _stream_converter(self, response: httpx.Response, from_provider: str, to_format: str, original_model: str):
