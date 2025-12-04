@@ -14,7 +14,7 @@ def setup_logging(log_level: str = None):
     """
     
     # 定义日志格式
-    log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    log_format = "%(asctime)s | %(levelname)^8s | %(name)s | %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
 
     # 确定日志等级
