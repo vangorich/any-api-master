@@ -2,7 +2,9 @@ import json
 import httpx
 import logging
 import time
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Coroutine
+import asyncio
+import uuid
 from fastapi import Request, Response, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -335,6 +337,82 @@ class ProxyService:
             raise HTTPException(status_code=502, detail=f"Upstream service error: {str(e)}")
 
 
+    async def _pseudo_stream_generator(self, upstream_request_coro: Coroutine, db: AsyncSession, log_entry: Log, key_obj: OfficialKey, from_provider: str, to_format: str, start_time: float, original_model: str):
+        """
+        用于伪流的生成器。在等待非流式上游响应时发送心跳，
+        然后转换并流式传输最终结果。该方法也处理日志记录。
+        """
+        ttft = 0.0
+        output_tokens = 0
+        status_code = 500  # 默认为错误
+        
+        try:
+            upstream_task = asyncio.create_task(upstream_request_coro)
+            
+            while not upstream_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(upstream_task), timeout=1.0)
+                except asyncio.TimeoutError:
+                    logger.debug("[Proxy] Pseudo-stream heartbeat.")
+                    yield ":\n\n"
+            
+            ttft = time.time() - start_time
+            
+            resp_content, response_status_code = await upstream_task
+            status_code = response_status_code  # 更新状态码
+            
+            if status_code >= 400:
+                converted_error = ErrorConverter.convert_upstream_error(resp_content, status_code, from_provider, to_format)
+                yield f"data: {json.dumps(converted_error)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            resp_json = json.loads(resp_content)
+            logger.debug(f"[Proxy] Pseudo-stream received upstream response: {json.dumps(resp_json, indent=2, ensure_ascii=False)}")
+            
+            final_response, _ = universal_converter.convert_response(resp_json, to_format, from_provider, original_model)
+            logger.debug(f"[Proxy] Pseudo-stream converted to final response: {json.dumps(final_response, indent=2, ensure_ascii=False)}")
+
+            response_content = final_response.get('choices', [{}])[0].get('message', {}).get('content', '')
+            tool_calls = final_response.get('choices', [{}])[0].get('message', {}).get('tool_calls')
+            
+            tokenizer = get_tokenizer(original_model)
+            output_tokens = len(tokenizer.encode(response_content or ""))
+            
+            chunk_id = f"chatcmpl-pseudo-{uuid.uuid4().hex}"
+            created_time = int(time.time())
+
+            # 1. 发送角色块
+            yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': original_model, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
+            
+            # 2. 发送内容块
+            if response_content:
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': original_model, 'choices': [{'index': 0, 'delta': {'content': response_content}, 'finish_reason': None}]})}\n\n"
+
+            # 3. 发送工具调用块并设置结束原因
+            finish_reason = "stop"
+            if tool_calls:
+                finish_reason = "tool_calls"
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': original_model, 'choices': [{'index': 0, 'delta': {'tool_calls': tool_calls}, 'finish_reason': None}]})}\n\n"
+
+            # 4. 发送带有结束原因的最终空 delta 块
+            yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': original_model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish_reason}]})}\n\n"
+
+            # 5. 发送 [DONE] 消息
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            status_code = 500
+            logger.error(f"[Proxy] Error in pseudo-stream generator: {e}", exc_info=True)
+            error_message = f"Pseudo-stream failed: {str(e)}"
+            converted_error = ErrorConverter.convert_upstream_error(error_message.encode('utf-8'), 500, from_provider, to_format)
+            yield f"data: {json.dumps(converted_error)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            latency = time.time() - start_time
+            await self._finalize_log(db, log_entry, key_obj, status_code, latency, output_tokens, ttft)
+
+
     async def _handle_conversion(
         self,
         request: Request,
@@ -371,10 +449,15 @@ class ProxyService:
         target_url = ""
         target_method = request.method
         stream = body.get("stream", False)
-        
-        logger.info(f"[Proxy] Converting body... (Stream={stream})")
-        
         original_model = body.get("model", "unknown")
+        is_pseudo_stream = original_model.startswith("伪流/") and stream
+
+        if is_pseudo_stream:
+            stream = False # 强制上游请求为非流式
+            body["model"] = original_model.replace("伪流/", "", 1)
+            logger.info(f"[Proxy] Pseudo-stream detected. Upstream will be non-streaming. Original model: {original_model}")
+        
+        logger.info(f"[Proxy] Converting body... (Stream={body.get('stream', False)}, IsPseudoStream={is_pseudo_stream})")
         
         if target_provider == "gemini":
             raw_model = body.get("model", "") or converted_body.get("model", "gemini-1.5-pro")
@@ -440,41 +523,65 @@ class ProxyService:
             req = client.build_request(
                 target_method, target_url, headers=headers, json=converted_body, timeout=120.0
             )
-            response = await client.send(req, stream=True)
+
+            if is_pseudo_stream:
+                async def upstream_request_coro():
+                    try:
+                        # 发起非流式请求
+                        response = await client.send(req, stream=False)
+                        resp_content = await response.aread()
+                        await response.aclose()
+                        return resp_content, response.status_code
+                    except httpx.RequestError as e:
+                        logger.error(f"Pseudo-stream upstream request failed: {e}")
+                        error_message = f"Upstream service error: {str(e)}"
+                        return error_message.encode('utf-8'), 502
+
+                return StreamingResponse(
+                    self._pseudo_stream_generator(
+                        upstream_request_coro=upstream_request_coro(),
+                        db=db,
+                        log_entry=log_entry,
+                        key_obj=key_obj,
+                        from_provider=target_provider,
+                        to_format=incoming_format,
+                        start_time=start_time,
+                        original_model=original_model
+                    ),
+                    media_type="text/event-stream"
+                )
+
+            # --- 原始的真流和非流处理逻辑 ---
+            is_real_stream = body.get("stream", False)
+            response = await client.send(req, stream=is_real_stream)
             
             if response.status_code >= 400:
                 error_content = await response.aread()
                 await response.aclose()
                 latency = time.time() - start_time
                 await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
-                # Convert the error to the original incoming format
                 converted_error = ErrorConverter.convert_upstream_error(error_content, response.status_code, target_provider, incoming_format)
                 return JSONResponse(status_code=response.status_code, content=converted_error)
 
-            if stream:
+            if is_real_stream:
                 return StreamingResponse(
-                    self._stream_converter_with_logging(response, db, log_entry, key_obj, target_provider, incoming_format, start_time, original_model), # 转换流维持原状，因为它在内部处理 token
+                    self._stream_converter_with_logging(response, db, log_entry, key_obj, target_provider, incoming_format, start_time, original_model),
                     media_type="text/event-stream"
                 )
-            else:
+            else: # 非流式
                 resp_content = await response.aread()
                 await response.aclose()
                 latency = time.time() - start_time
                 output_tokens = 0
                 try:
                     resp_json = json.loads(resp_content)
-                    resp_json = json.loads(resp_content)
                     logger.debug(f"[Proxy] 从上游接收的原始响应体: {json.dumps(resp_json, indent=2, ensure_ascii=False)}")
                     final_response, _ = universal_converter.convert_response(resp_json, incoming_format, target_provider, original_model)
                     logger.debug(f"[Proxy] 准备发送给客户端的最终响应体: {json.dumps(final_response, indent=2, ensure_ascii=False)}")
                     
-                    # Recalculate output_tokens from actual response
                     tokenizer = get_tokenizer(original_model)
                     response_content = final_response.get('choices', [{}])[0].get('message', {}).get('content', '')
-                    output_tokens = len(tokenizer.encode(response_content))
-
-                    # Update input tokens if provider gives a more accurate count
-                    # This part is now handled by tiktoken initially, but can be refined
+                    output_tokens = len(tokenizer.encode(response_content or ""))
                     
                     await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, output_tokens, latency)
                     logger.info(f"响应转换: 上游格式 ({target_provider}) -> 客户端格式 ({incoming_format})")
@@ -482,7 +589,6 @@ class ProxyService:
                         
                 except json.JSONDecodeError:
                     await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0, latency)
-                    # The response is not valid JSON, but we should still try to inform the client in the right format
                     error_message = f"Upstream service returned non-JSON response with status {response.status_code}"
                     converted_error = ErrorConverter.convert_upstream_error(error_message.encode(), response.status_code, target_provider, incoming_format)
                     return JSONResponse(status_code=response.status_code, content=converted_error)
