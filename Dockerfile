@@ -16,7 +16,6 @@ RUN npm install
 # 复制前端源码
 COPY src ./src
 COPY public ./public
-COPY index.html ./
 
 # 构建前端
 RUN npm run build
