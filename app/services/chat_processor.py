@@ -19,7 +19,8 @@ from app.models.log import Log
 from app.models.key import count_tokens_for_messages, get_tokenizer
 from app.core.config import settings
 from sqlalchemy.future import select
-from fastapi import Request
+from fastapi import Request, BackgroundTasks
+import traceback
 
 import datetime
 
@@ -33,38 +34,30 @@ class ChatProcessor:
         self,
         request: Request,
         db: AsyncSession,
-        official_key: OfficialKey, # Changed from str to OfficialKey object
+        official_key: OfficialKey,
         exclusive_key: ExclusiveKey,
         user: User,
+        background_tasks: BackgroundTasks,
         model_override: str = None,
-        original_format: ApiFormat = "openai" # Assume openai by default
-    ) -> Tuple[Dict[str, Any], int, ApiFormat]:
+        original_format: ApiFormat = "openai"
+    ):
         start_time = time.time()
-        body_bytes = await request.body()
-        body = json.loads(body_bytes)
-        # 仅在DEBUG模式下打印完整请求体
+        body = await request.json()
         logger.debug(f"客户端原始请求体: {json.dumps(body, indent=2, ensure_ascii=False)}")
-        
-        # The target format is determined by the channel configuration
-        target_format = "gemini" # Default value
-        if official_key.channel and official_key.channel.type:
-            target_format = official_key.channel.type.lower()
 
-        # Convert the incoming request (original_format) to our internal standard (openai)
-        # The original_format from the request body detection is less reliable than the one passed from the endpoint.
-        # We will use the one passed from the endpoint.
-        converted_body, _ = await universal_converter.convert_request(body, "openai", request=request)
+        target_format = official_key.channel.type.lower() if official_key.channel and official_key.channel.type else "gemini"
         
         logger.info(f"渠道 '{exclusive_key.name}' (ID: {exclusive_key.channel_id}) 接收到客户端请求: {request.url}")
         logger.info(f"请求转换: 客户端格式 ({original_format}) -> 内部格式 (openai)")
         logger.info(f"上游转换: 内部格式 (openai) -> 目标格式 ({target_format})")
-        
+
+        converted_body, _ = await universal_converter.convert_request(body, "openai", request=request)
         if model_override:
             converted_body["model"] = model_override
             
         openai_request = ChatCompletionRequest(**converted_body)
         
-        log_entry = await self._create_initial_log(db, exclusive_key, official_key, user, openai_request.model, openai_request.stream, [msg.dict() for msg in openai_request.messages])
+        log_entry = await self._create_and_commit_initial_log(db, exclusive_key, official_key, user, openai_request.model, openai_request.stream, [msg.dict() for msg in openai_request.messages])
 
         presets, regex_rules, preset_regex_rules = await self._load_context(db, exclusive_key)
         openai_request = self._apply_preprocessing(openai_request, presets, regex_rules, preset_regex_rules)
@@ -72,27 +65,56 @@ class ChatProcessor:
         logger.debug(f"发送到上游的最终请求体: {json.dumps(final_payload, indent=2, ensure_ascii=False)}")
         
         if openai_request.stream:
-            return self._logged_stream_generator(
-                self.stream_chat_completion(
+            full_response_content = ""
+            ttft = 0.0
+
+            async def stream_generator_wrapper():
+                nonlocal full_response_content, ttft
+                first_chunk_time = None
+                
+                gen = self.stream_chat_completion(
                     final_payload, target_format, original_format, openai_request.model,
                     official_key, regex_rules, preset_regex_rules
-                ),
+                )
+                
+                async for chunk in gen:
+                    if first_chunk_time is None:
+                        first_chunk_time = time.time()
+                        ttft = first_chunk_time - start_time
+
+                    if chunk.startswith(b'data: '):
+                        content_part = chunk[6:].strip()
+                        if content_part != b'[DONE]':
+                            try:
+                                json_content = json.loads(content_part)
+                                if json_content.get('choices'):
+                                    delta = json_content['choices'][0].get('delta', {})
+                                    full_response_content += delta.get('content', '')
+                            except json.JSONDecodeError:
+                                pass
+                    yield chunk
+
+            background_tasks.add_task(
+                self._update_final_log,
                 db=db,
-                log_entry=log_entry,
-                official_key=official_key, # Pass official_key object
-                start_time=start_time
+                log_id=log_entry.id,
+                start_time=start_time,
+                get_full_response=lambda: full_response_content,
+                get_ttft=lambda: ttft
             )
+            
+            return stream_generator_wrapper()
         else:
             result, status_code, _ = await self.non_stream_chat_completion(
                 final_payload, target_format, original_format, openai_request.model,
                 official_key, regex_rules, preset_regex_rules
             )
             latency = time.time() - start_time
-            # Re-calculate output tokens from the actual response content
             tokenizer = get_tokenizer(openai_request.model)
             response_content = result.get('choices', [{}])[0].get('message', {}).get('content', '')
             output_tokens = len(tokenizer.encode(response_content))
-            await self._finalize_log(db, log_entry, official_key, status_code, latency, output_tokens)
+            
+            await self._update_final_log(db, log_entry.id, start_time, lambda: response_content, lambda: latency, status_code)
             return result, status_code, original_format
 
     async def _load_context(self, db: AsyncSession, exclusive_key: ExclusiveKey) -> Tuple[List, List, List]:
@@ -175,8 +197,7 @@ class ChatProcessor:
         content = regex_service.process(content, global_post)
         return content
 
-    async def _create_initial_log(self, db: AsyncSession, exclusive_key: ExclusiveKey, official_key: OfficialKey, user: User, model: str, is_stream: bool, messages: List[Dict[str, Any]]) -> Log:
-        # Use tiktoken for input tokens
+    async def _create_and_commit_initial_log(self, db: AsyncSession, exclusive_key: ExclusiveKey, official_key: OfficialKey, user: User, model: str, is_stream: bool, messages: List[Dict[str, Any]]) -> Log:
         input_tokens = count_tokens_for_messages(messages, model)
         
         log_entry = Log(
@@ -184,52 +205,69 @@ class ChatProcessor:
             official_key_id=official_key.id,
             user_id=user.id,
             model=model,
-            status="processing",
+            status="processing", # Will be updated by background task
             status_code=0,
-            latency=0, ttft=0,
+            latency=0,
+            ttft=0,
             is_stream=is_stream,
             input_tokens=input_tokens,
-            output_tokens=0
+            output_tokens=0 # Placeholder
         )
+        db.add(log_entry)
+        
+        # Immediately update usage count
+        official_key.usage_count += 1
+        official_key.input_tokens = (official_key.input_tokens or 0) + (input_tokens or 0)
+        db.add(official_key)
+        
+        await db.commit()
+        await db.refresh(log_entry)
+        
+        logger.info(f"已创建初始日志条目 (ID: {log_entry.id}) 并更新密钥使用次数 (Official Key ID: {official_key.id})")
         return log_entry
 
-    async def _finalize_log(self, db: AsyncSession, log_entry: Optional[Log], official_key: OfficialKey, status_code: Any, latency: float, output_tokens: int, ttft: Optional[float] = None):
-        if not log_entry or not official_key:
-            return
-
+    async def _update_final_log(self, db: AsyncSession, log_id: int, start_time: float, get_full_response, get_ttft, status_code: int = 200):
         try:
-            # Ensure status_code is a valid integer for comparison
-            try:
-                numeric_status_code = int(status_code)
-            except (ValueError, TypeError):
-                numeric_status_code = 500  # Default to internal server error if conversion fails
-            
-            # 1. Finalize Log
-            log_entry.status_code = numeric_status_code
-            log_entry.status = "ok" if 200 <= numeric_status_code < 300 else "error"
+            latency = time.time() - start_time
+            full_response_content = get_full_response()
+            ttft = get_ttft()
+
+            result = await db.execute(select(Log).filter(Log.id == log_id))
+            log_entry = result.scalars().first()
+            if not log_entry:
+                logger.error(f"后台任务无法找到日志条目: ID={log_id}")
+                return
+
+            result = await db.execute(select(OfficialKey).filter(OfficialKey.id == log_entry.official_key_id))
+            official_key = result.scalars().first()
+            if not official_key:
+                logger.error(f"后台任务无法找到官方密钥: ID={log_entry.official_key_id}")
+                return
+
+            tokenizer = get_tokenizer(log_entry.model)
+            output_tokens = len(tokenizer.encode(full_response_content))
+
+            log_entry.status_code = status_code
+            log_entry.status = "ok" if 200 <= status_code < 300 else "error"
             log_entry.latency = latency
-            log_entry.ttft = ttft if ttft is not None else latency
+            log_entry.ttft = ttft if ttft > 0 else latency
             log_entry.output_tokens = output_tokens
             db.add(log_entry)
 
-            # 2. Update Official Key Stats
-            official_key.usage_count += 1
-            official_key.input_tokens = (official_key.input_tokens or 0) + (log_entry.input_tokens or 0)
             official_key.output_tokens = (official_key.output_tokens or 0) + output_tokens
-            official_key.last_status_code = numeric_status_code
-            
+            official_key.last_status_code = status_code
             if log_entry.status == "error":
                 official_key.error_count += 1
                 official_key.last_status = str(status_code)
             else:
                 official_key.last_status = "active"
-
             db.add(official_key)
+            
             await db.commit()
-            logger.info(f"[ChatProcessor] 日志已归档，Key 统计已更新 (Official Key ID {official_key.id})")
+            logger.info(f"后台任务成功更新最终日志 (ID: {log_id})")
 
         except Exception as e:
-            logger.error(f"[ChatProcessor] 归档日志或更新 Key 统计失败 (Official Key ID {official_key.id}). 错误: {e}", exc_info=True)
+            logger.error(f"后台日志更新任务失败 (Log ID: {log_id})。错误: {e}\n{traceback.format_exc()}")
             await db.rollback()
 
     async def non_stream_chat_completion(
@@ -288,47 +326,8 @@ class ChatProcessor:
         logger.debug(f"准备发送给客户端的最终响应体: {json.dumps(internal_response, indent=2, ensure_ascii=False)}")
         return internal_response, 200, original_format
 
-    async def _logged_stream_generator(self, generator: AsyncGenerator, db: AsyncSession, log_entry: Log, official_key: OfficialKey, start_time: float):
-        ttft = 0.0
-        first_chunk = True
-        full_response_content = ""
-        status_code = 200
-        try:
-            async for chunk in generator:
-                if first_chunk:
-                    ttft = time.time() - start_time
-                    first_chunk = False
-                
-                if chunk.startswith(b'data: '):
-                    content_part = chunk[6:].strip()
-                    if content_part != b'[DONE]':
-                        try:
-                            json_content = json.loads(content_part)
-                            # Handle cases where json_content might be a list of chunks
-                            chunks_to_process = json_content if isinstance(json_content, list) else [json_content]
-                            for chunk_item in chunks_to_process:
-                                if not isinstance(chunk_item, dict): continue
-
-                                if chunk_item.get('error'):
-                                    # Ensure status_code is an integer
-                                    code = chunk_item.get('error', {}).get('code', 500)
-                                    try:
-                                        status_code = int(code)
-                                    except (ValueError, TypeError):
-                                        status_code = 500 # Fallback for non-integer codes
-                                if chunk_item.get('choices'):
-                                    delta = chunk_item['choices'][0].get('delta', {})
-                                    full_response_content += delta.get('content', '')
-                        except json.JSONDecodeError:
-                            pass
-                yield chunk
-        finally:
-            # This block now only executes on successful completion.
-            # CancelledError is handled by the middleware in main.py.
-            latency = time.time() - start_time
-            tokenizer = get_tokenizer(log_entry.model)
-            output_tokens = len(tokenizer.encode(full_response_content))
-            await self._finalize_log(db, log_entry, official_key, status_code, latency, output_tokens, ttft)
+    # This function is no longer needed as the logic is now inside process_request
+    # async def _logged_stream_generator(...):
 
 
     async def stream_chat_completion(

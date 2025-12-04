@@ -3,7 +3,7 @@ import time
 import httpx
 import logging
 from typing import Any, List, AsyncGenerator
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -99,6 +99,7 @@ async def proxy_beta_requests(
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(deps.get_db),
     key_info: tuple = Depends(deps.get_official_key_from_proxy)
 ):
@@ -136,12 +137,12 @@ async def chat_completions(
             official_key=official_key,
             exclusive_key=exclusive_key,
             user=user,
-            # For this endpoint, the client is always speaking the "openai" format
+            background_tasks=background_tasks,
             original_format="openai"
         )
         
-        # 根据结果类型返回响应
         if isinstance(result, AsyncGenerator):
+            # The background task is already added by process_request
             return StreamingResponse(result, media_type="text/event-stream")
         else:
             response_content, status_code, _ = result
